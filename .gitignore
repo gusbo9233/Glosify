@@ -1,0 +1,88 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+*.egg-info/
+dist/
+build/
+
+# Flask
+instance/database.db
+instance/*.db
+*.db-journal
+
+# Environment variables and secrets
+.env
+.env.local
+apikey.txt
+*.key
+*.pem
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+result.txt
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node/React Native
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Expo
+.expo/
+.expo/**
+dist/
+web-build/
+expo-env.d.ts
+
+# Native builds
+ios/
+android/
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.mobileprovision
+
+# Metro
+.metro-health-check*
+
+# TypeScript
+*.tsbuildinfo
+
+# Temporary files
+*.tmp
+*.temp
+textbook-example.txt
+openaidocs.txt
+
+# Documentation (optional - uncomment if you want to exclude)
+# docs/
