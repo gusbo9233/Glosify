@@ -1,9 +1,0 @@
-The app will have a UI that is inspired by Spotify
-On the left side there will always be a treeview where quizzes will be shown and they can be arranged in folder
-Quiz = Playlist
-When you click a quiz its words will be shown on the right side
-Word pair = Song 
-Every word can have a clickable base word that will show a page with data about the word 
-base word = artist 
-In the quiz/playlist view, the user can enable shuffle and other option for the quiz
-The user can then click the play button and the playlist view will be replaced by the quiz
