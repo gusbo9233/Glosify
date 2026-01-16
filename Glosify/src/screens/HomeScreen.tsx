@@ -11,7 +11,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, fontSize, borderRadius, shadows } from '../utils/theme';
 import { useApp } from '../context/AppContext';
-import { Quiz } from '../types';
+import { Quiz, Folder } from '../types';
 import quizService from '../api/quizService';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -19,12 +19,27 @@ const isTablet = SCREEN_WIDTH > 768;
 
 interface HomeScreenProps {
   onQuizPress: (quiz: Quiz) => void;
+  onStartAnkiPress: (quiz: Quiz, mode: 'words' | 'sentences') => void;
 }
 
+// Helper to get all quizzes including those in nested folders
+const getAllQuizzesFromFolders = (folderList: Folder[]): Quiz[] => {
+  let allQuizzes: Quiz[] = [];
+  for (const folder of folderList) {
+    allQuizzes = [...allQuizzes, ...folder.quizzes];
+    allQuizzes = [...allQuizzes, ...getAllQuizzesFromFolders(folder.subfolders)];
+  }
+  return allQuizzes;
+};
+
 const HomeScreen: React.FC<HomeScreenProps> = ({ 
-  onQuizPress
+  onQuizPress,
+  onStartAnkiPress,
 }) => {
   const { quizzes, folders, user } = useApp();
+  
+  // Get all quizzes (root level + from all folders)
+  const allQuizzes = [...quizzes, ...getAllQuizzesFromFolders(folders)];
   const [ankiStats, setAnkiStats] = useState<{
     total_due: number;
     total_new: number;
@@ -52,18 +67,18 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
       }
     };
 
-    if (quizzes.length > 0) {
+    if (allQuizzes.length > 0) {
       fetchAnkiStats();
     } else {
       setLoadingAnki(false);
     }
-  }, [quizzes.length]);
+  }, [allQuizzes.length]);
 
   // Calculate statistics
-  const totalQuizzes = quizzes.length;
-  const totalWords = quizzes.reduce((sum, quiz) => sum + (quiz.words?.length || 0), 0);
-  const totalSentences = quizzes.reduce((sum, quiz) => sum + (quiz.sentences?.length || 0), 0);
-  const recentQuizzes = [...quizzes]
+  const totalQuizzes = allQuizzes.length;
+  const totalWords = allQuizzes.reduce((sum, quiz) => sum + (quiz.words?.length || 0), 0);
+  const totalSentences = allQuizzes.reduce((sum, quiz) => sum + (quiz.sentences?.length || 0), 0);
+  const recentQuizzes = [...allQuizzes]
     .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
     .slice(0, 6);
 
@@ -146,21 +161,38 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
                     style={styles.quizWithDueItem}
                     onPress={() => {
                       const foundQuiz = quizzes.find(q => q.id === quiz.id);
-                      if (foundQuiz) onQuizPress(foundQuiz);
+                      if (foundQuiz) {
+                        const defaultMode = quiz.due_words > 0 ? 'words' : 'sentences';
+                        onStartAnkiPress(foundQuiz, defaultMode);
+                      }
                     }}
                     activeOpacity={0.7}
                   >
                     <Text style={styles.quizWithDueName}>{quiz.name}</Text>
                     <View style={styles.quizWithDueBadges}>
                       {quiz.due_words > 0 && (
-                        <View style={styles.dueBadge}>
+                        <TouchableOpacity
+                          style={styles.dueBadge}
+                          onPress={() => {
+                            const foundQuiz = quizzes.find(q => q.id === quiz.id);
+                            if (foundQuiz) onStartAnkiPress(foundQuiz, 'words');
+                          }}
+                          activeOpacity={0.8}
+                        >
                           <Text style={styles.dueBadgeText}>{quiz.due_words} words</Text>
-                        </View>
+                        </TouchableOpacity>
                       )}
                       {quiz.due_sentences > 0 && (
-                        <View style={styles.dueBadge}>
+                        <TouchableOpacity
+                          style={styles.dueBadge}
+                          onPress={() => {
+                            const foundQuiz = quizzes.find(q => q.id === quiz.id);
+                            if (foundQuiz) onStartAnkiPress(foundQuiz, 'sentences');
+                          }}
+                          activeOpacity={0.8}
+                        >
                           <Text style={styles.dueBadgeText}>{quiz.due_sentences} sentences</Text>
-                        </View>
+                        </TouchableOpacity>
                       )}
                     </View>
                   </TouchableOpacity>

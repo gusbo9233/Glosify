@@ -34,7 +34,7 @@ interface AppContextType extends AppState {
   loadQuizzes: () => Promise<void>;
   selectQuiz: (quiz: Quiz | null) => void;
   selectWord: (word: Word | null) => void;
-  createQuiz: (name: string, sourceLanguage?: string, targetLanguage?: string, prompt?: string) => Promise<Quiz | null>;
+  createQuiz: (name: string, sourceLanguage?: string, targetLanguage?: string, prompt?: string, folderId?: number) => Promise<Quiz | null>;
   createQuizFromText: (name: string, language: string, content: string, context?: string) => Promise<Quiz | null>;
   importTextToQuiz: (quizId: number, language: string, content: string, context?: string) => Promise<void>;
   importImageToQuiz: (quizId: number, imageBase64: string, context?: string) => Promise<void>;
@@ -42,6 +42,7 @@ interface AppContextType extends AppState {
   addWordToQuiz: (quizId: number, lemma: string, translation: string) => Promise<void>;
   
   // Folder actions
+  loadFolders: () => Promise<void>;
   createFolder: (name: string, parentId?: number) => Promise<Folder>;
   deleteFolder: (folderId: number) => Promise<void>;
   moveQuizToFolder: (quizId: number, folderId: number | null) => Promise<void>;
@@ -281,11 +282,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     name: string,
     sourceLanguage?: string,
     targetLanguage?: string,
-    prompt?: string
+    prompt?: string,
+    folderId?: number
   ): Promise<Quiz | null> => {
     try {
-      const quiz = await quizService.createQuiz(name, sourceLanguage, targetLanguage, prompt);
+      const quiz = await quizService.createQuiz(name, sourceLanguage, targetLanguage, prompt, folderId);
       await loadQuizzes();
+      await loadFolders();
       return quiz;
     } catch {
       return null;
@@ -373,9 +376,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return quizService.addWord(quizId, lemma, translation)
       .then(async () => {
         // Refresh quiz after word is added
-        if (state.selectedQuiz?.id === quizId) {
-          await selectQuiz(state.selectedQuiz);
-        }
+      if (state.selectedQuiz?.id === quizId) {
+        await selectQuiz(state.selectedQuiz);
+      }
       })
       .catch((error) => {
         console.error('Failed to add word:', error);
@@ -485,6 +488,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     importImageToQuiz,
     deleteQuiz,
     addWordToQuiz,
+    loadFolders,
     createFolder,
     deleteFolder,
     moveQuizToFolder,

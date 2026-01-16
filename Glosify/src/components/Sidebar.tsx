@@ -14,6 +14,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, fontSize, borderRadius, shadows } from '../utils/theme';
 import { useApp } from '../context/AppContext';
 import { Quiz, Folder } from '../types';
+import folderService from '../api/folderService';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const SIDEBAR_WIDTH = Math.min(280, SCREEN_WIDTH * 0.35);
@@ -25,7 +26,7 @@ interface SidebarProps {
 }
 
 const Sidebar: React.FC<SidebarProps> = ({ onClose, onQuizSelect, onHomeClick }) => {
-  const { quizzes, folders, selectedQuiz, selectQuiz, createQuiz, deleteQuiz, createFolder, deleteFolder, toggleFolderExpanded, moveQuizToFolder, logout, user } = useApp();
+  const { quizzes, folders, selectedQuiz, selectQuiz, createQuiz, deleteQuiz, createFolder, deleteFolder, toggleFolderExpanded, moveQuizToFolder, loadFolders, logout, user } = useApp();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [showCreateFolderModal, setShowCreateFolderModal] = useState(false);
@@ -34,6 +35,8 @@ const Sidebar: React.FC<SidebarProps> = ({ onClose, onQuizSelect, onHomeClick })
   const [quizToDelete, setQuizToDelete] = useState<Quiz | null>(null);
   const [quizToMove, setQuizToMove] = useState<Quiz | null>(null);
   const [folderToDelete, setFolderToDelete] = useState<number | null>(null);
+  const [showMoveFolderModal, setShowMoveFolderModal] = useState(false);
+  const [folderToMove, setFolderToMove] = useState<Folder | null>(null);
   const [newQuizName, setNewQuizName] = useState('');
   const [newQuizSourceLanguage, setNewQuizSourceLanguage] = useState<string>('');
   const [newQuizTargetLanguage, setNewQuizTargetLanguage] = useState<string>('');
@@ -43,6 +46,8 @@ const Sidebar: React.FC<SidebarProps> = ({ onClose, onQuizSelect, onHomeClick })
   const [newFolderName, setNewFolderName] = useState('');
   const [parentFolderId, setParentFolderId] = useState<number | undefined>(undefined);
   const [searchQuery, setSearchQuery] = useState('');
+  const [selectedFolderId, setSelectedFolderId] = useState<number | null>(null);
+  const [newQuizFolderId, setNewQuizFolderId] = useState<number | undefined>(undefined);
   
   const sourceLanguages = ['English', 'Swedish'];
   const targetLanguages = ['Polish', 'Ukrainian'];
@@ -51,18 +56,50 @@ const Sidebar: React.FC<SidebarProps> = ({ onClose, onQuizSelect, onHomeClick })
     q.name.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
+  // Helper to filter folders and their quizzes by search query
+  const filterFoldersBySearch = (folderList: Folder[], query: string): Folder[] => {
+    if (!query.trim()) return folderList;
+    
+    const lowerQuery = query.toLowerCase();
+    
+    return folderList.map(folder => {
+      // Filter quizzes in this folder
+      const matchingQuizzes = folder.quizzes.filter(q => 
+        q.name.toLowerCase().includes(lowerQuery)
+      );
+      
+      // Recursively filter subfolders
+      const filteredSubfolders = filterFoldersBySearch(folder.subfolders, query);
+      
+      // Include folder if it has matching quizzes or matching subfolders
+      if (matchingQuizzes.length > 0 || filteredSubfolders.length > 0) {
+        return {
+          ...folder,
+          quizzes: matchingQuizzes,
+          subfolders: filteredSubfolders,
+          isExpanded: true, // Auto-expand when searching
+        };
+      }
+      return null;
+    }).filter((f): f is Folder => f !== null);
+  };
+
+  const filteredFolders = filterFoldersBySearch(folders, searchQuery);
+
   const handleCreateQuiz = async () => {
     if (newQuizName.trim()) {
       await createQuiz(
         newQuizName.trim(),
         newQuizSourceLanguage.trim() || undefined,
         newQuizTargetLanguage.trim() || undefined,
-        newQuizPrompt.trim() || undefined
+        newQuizPrompt.trim() || undefined,
+        newQuizFolderId
       );
       setNewQuizName('');
       setNewQuizSourceLanguage('');
       setNewQuizTargetLanguage('');
       setNewQuizPrompt('');
+      setNewQuizFolderId(undefined);
       setShowSourceLanguageDropdown(false);
       setShowTargetLanguageDropdown(false);
       setShowCreateModal(false);
@@ -97,6 +134,38 @@ const Sidebar: React.FC<SidebarProps> = ({ onClose, onQuizSelect, onHomeClick })
         console.error('Failed to move quiz:', error);
       }
     }
+  };
+
+  const handleMoveFolderClick = (e: any, folder: Folder) => {
+    e.stopPropagation();
+    setFolderToMove(folder);
+    setShowMoveFolderModal(true);
+  };
+
+  const handleMoveFolder = async (newParentId: number | null) => {
+    if (folderToMove) {
+      try {
+        await folderService.updateFolder(folderToMove.id, { parent_id: newParentId });
+        await loadFolders();
+        setShowMoveFolderModal(false);
+        setFolderToMove(null);
+      } catch (error) {
+        console.error('Failed to move folder:', error);
+        setShowMoveFolderModal(false);
+        setFolderToMove(null);
+      }
+    }
+  };
+
+  // Get folders excluding the folder being moved and its descendants
+  const getValidParentFolders = (folderList: Folder[], excludeId: number | null, result: Array<{id: number | null, name: string, depth: number}> = [], depth: number = 0): Array<{id: number | null, name: string, depth: number}> => {
+    folderList.forEach(folder => {
+      if (folder.id !== excludeId) {
+        result.push({ id: folder.id, name: folder.name, depth });
+        getValidParentFolders(folder.subfolders, excludeId, result, depth + 1);
+      }
+    });
+    return result;
   };
 
   // Helper to get all folders as a flat list for selection
@@ -172,16 +241,23 @@ const Sidebar: React.FC<SidebarProps> = ({ onClose, onQuizSelect, onHomeClick })
           <Text style={styles.folderName} numberOfLines={1}>
             {folder.name}
           </Text>
-          <TouchableOpacity
-            style={styles.folderActions}
-            onPress={(e) => {
-              e.stopPropagation();
-              handleDeleteFolder(folder.id);
-            }}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-          >
-            <Ionicons name="trash-outline" size={16} color={colors.textMuted} />
-          </TouchableOpacity>
+          <View style={styles.folderActions}>
+            <TouchableOpacity
+              onPress={(e) => handleMoveFolderClick(e, folder)}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            >
+              <Ionicons name="arrow-forward-outline" size={16} color={colors.textMuted} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={(e) => {
+                e.stopPropagation();
+                handleDeleteFolder(folder.id);
+              }}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            >
+              <Ionicons name="trash-outline" size={16} color={colors.textMuted} />
+            </TouchableOpacity>
+          </View>
         </TouchableOpacity>
         {folder.isExpanded && (
           <View>
@@ -213,13 +289,22 @@ const Sidebar: React.FC<SidebarProps> = ({ onClose, onQuizSelect, onHomeClick })
                     {quiz.words?.length || 0} words
                   </Text>
                 </View>
-                <TouchableOpacity
-                  style={styles.deleteButton}
-                  onPress={(e) => handleDeleteClick(e, quiz)}
-                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                >
-                  <Ionicons name="trash-outline" size={18} color={colors.textMuted} />
-                </TouchableOpacity>
+                <View style={styles.quizActions}>
+                  <TouchableOpacity
+                    style={styles.actionButton}
+                    onPress={(e) => handleMoveQuizClick(e, quiz)}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                  >
+                    <Ionicons name="folder-outline" size={18} color={colors.textMuted} />
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.actionButton}
+                    onPress={(e) => handleDeleteClick(e, quiz)}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                  >
+                    <Ionicons name="trash-outline" size={18} color={colors.textMuted} />
+                  </TouchableOpacity>
+                </View>
               </TouchableOpacity>
             ))}
           </View>
@@ -278,9 +363,11 @@ const Sidebar: React.FC<SidebarProps> = ({ onClose, onQuizSelect, onHomeClick })
       {/* Folders and Quizzes List */}
       <ScrollView style={styles.quizzesList} showsVerticalScrollIndicator={false}>
         <Text style={styles.sectionTitle}>YOUR QUIZZES</Text>
-        {folders.length > 0 && renderFolderTree(folders)}
+        {(searchQuery ? filteredFolders : folders).length > 0 && renderFolderTree(searchQuery ? filteredFolders : folders)}
         {filteredQuizzes.length === 0 && folders.length === 0 ? (
           <Text style={styles.emptyText}>No quizzes yet</Text>
+        ) : searchQuery && filteredQuizzes.length === 0 && filteredFolders.length === 0 ? (
+          <Text style={styles.emptyText}>No matching quizzes</Text>
         ) : (
           filteredQuizzes.map(quiz => (
             <TouchableOpacity
@@ -461,6 +548,39 @@ const Sidebar: React.FC<SidebarProps> = ({ onClose, onQuizSelect, onHomeClick })
                 textAlignVertical="top"
               />
             </View>
+
+            {/* Folder Selection (Optional) */}
+            {folders.length > 0 && (
+              <View>
+                <Text style={styles.modalLabel}>Folder (optional)</Text>
+                <ScrollView style={styles.parentFolderList} showsVerticalScrollIndicator={true}>
+                  <TouchableOpacity
+                    style={[
+                      styles.parentFolderOption,
+                      newQuizFolderId === undefined && styles.parentFolderOptionSelected
+                    ]}
+                    onPress={() => setNewQuizFolderId(undefined)}
+                  >
+                    <Ionicons name="home-outline" size={18} color={colors.textSecondary} />
+                    <Text style={styles.parentFolderOptionText}>Root (no folder)</Text>
+                  </TouchableOpacity>
+                  {getAllFoldersFlat(folders).filter(f => f.id !== null).map((folderOption) => (
+                    <TouchableOpacity
+                      key={folderOption.id}
+                      style={[
+                        styles.parentFolderOption,
+                        { paddingLeft: spacing.md + (folderOption.depth * spacing.md) },
+                        newQuizFolderId === folderOption.id && styles.parentFolderOptionSelected
+                      ]}
+                      onPress={() => setNewQuizFolderId(folderOption.id ?? undefined)}
+                    >
+                      <Ionicons name="folder" size={18} color={colors.textSecondary} />
+                      <Text style={styles.parentFolderOptionText}>{folderOption.name}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              </View>
+            )}
             
             <View style={styles.modalButtons}>
               <TouchableOpacity
@@ -532,6 +652,33 @@ const Sidebar: React.FC<SidebarProps> = ({ onClose, onQuizSelect, onHomeClick })
               onChangeText={setNewFolderName}
               autoFocus
               />
+            <Text style={styles.modalLabel}>Parent Folder (optional)</Text>
+            <ScrollView style={styles.parentFolderList} showsVerticalScrollIndicator={true}>
+              <TouchableOpacity
+                style={[
+                  styles.parentFolderOption,
+                  parentFolderId === undefined && styles.parentFolderOptionSelected
+                ]}
+                onPress={() => setParentFolderId(undefined)}
+              >
+                <Ionicons name="home-outline" size={18} color={colors.textSecondary} />
+                <Text style={styles.parentFolderOptionText}>Root (no parent)</Text>
+              </TouchableOpacity>
+              {getAllFoldersFlat(folders).map((folderOption) => (
+                <TouchableOpacity
+                  key={folderOption.id}
+                  style={[
+                    styles.parentFolderOption,
+                    { paddingLeft: spacing.md + (folderOption.depth * spacing.md) },
+                    parentFolderId === folderOption.id && styles.parentFolderOptionSelected
+                  ]}
+                  onPress={() => setParentFolderId(folderOption.id ?? undefined)}
+                >
+                  <Ionicons name="folder" size={18} color={colors.textSecondary} />
+                  <Text style={styles.parentFolderOptionText}>{folderOption.name}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
             <View style={styles.modalButtons}>
               <TouchableOpacity
                 style={styles.modalCancelButton}
@@ -602,6 +749,13 @@ const Sidebar: React.FC<SidebarProps> = ({ onClose, onQuizSelect, onHomeClick })
               Move "{quizToMove?.name}" to:
             </Text>
             <ScrollView style={styles.folderSelectList} showsVerticalScrollIndicator={true}>
+              <TouchableOpacity
+                style={styles.folderOption}
+                onPress={() => handleMoveToFolder(null)}
+              >
+                <Ionicons name="home-outline" size={18} color={colors.textSecondary} />
+                <Text style={styles.folderOptionText}>Root (no folder)</Text>
+              </TouchableOpacity>
               {getAllFoldersFlat(folders).map((folderOption) => (
                 <TouchableOpacity
                   key={folderOption.id ?? 'root'}
@@ -611,11 +765,7 @@ const Sidebar: React.FC<SidebarProps> = ({ onClose, onQuizSelect, onHomeClick })
                   ]}
                   onPress={() => handleMoveToFolder(folderOption.id)}
                 >
-                  <Ionicons 
-                    name={folderOption.id === null ? "home-outline" : "folder"} 
-                    size={18} 
-                    color={colors.textSecondary} 
-                  />
+                  <Ionicons name="folder" size={18} color={colors.textSecondary} />
                   <Text style={styles.folderOptionText}>{folderOption.name}</Text>
                 </TouchableOpacity>
               ))}
@@ -626,6 +776,56 @@ const Sidebar: React.FC<SidebarProps> = ({ onClose, onQuizSelect, onHomeClick })
                 onPress={() => {
                   setShowMoveQuizModal(false);
                   setQuizToMove(null);
+                }}
+              >
+                <Text style={styles.modalCancelText}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Move Folder Modal */}
+      <Modal
+        visible={showMoveFolderModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowMoveFolderModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Move Folder</Text>
+            <Text style={styles.moveQuizText}>
+              Move "{folderToMove?.name}" to:
+            </Text>
+            <ScrollView style={styles.folderSelectList} showsVerticalScrollIndicator={true}>
+              <TouchableOpacity
+                style={styles.folderOption}
+                onPress={() => handleMoveFolder(null)}
+              >
+                <Ionicons name="home-outline" size={18} color={colors.textSecondary} />
+                <Text style={styles.folderOptionText}>Root (no parent)</Text>
+              </TouchableOpacity>
+              {getValidParentFolders(folders, folderToMove?.id ?? null).map((folderOption) => (
+                <TouchableOpacity
+                  key={folderOption.id ?? 'root'}
+                  style={[
+                    styles.folderOption,
+                    { paddingLeft: spacing.md + (folderOption.depth * spacing.md) }
+                  ]}
+                  onPress={() => handleMoveFolder(folderOption.id)}
+                >
+                  <Ionicons name="folder" size={18} color={colors.textSecondary} />
+                  <Text style={styles.folderOptionText}>{folderOption.name}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={styles.modalCancelButton}
+                onPress={() => {
+                  setShowMoveFolderModal(false);
+                  setFolderToMove(null);
                 }}
               >
                 <Text style={styles.modalCancelText}>Cancel</Text>
@@ -723,6 +923,9 @@ const styles = StyleSheet.create({
     marginLeft: spacing.sm,
   },
   folderActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
     padding: spacing.xs,
     marginLeft: spacing.xs,
   },
@@ -1009,6 +1212,34 @@ const styles = StyleSheet.create({
     color: colors.textPrimary,
     fontSize: fontSize.md,
     marginLeft: spacing.sm,
+  },
+  modalLabel: {
+    color: colors.textSecondary,
+    fontSize: fontSize.sm,
+    marginTop: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  parentFolderList: {
+    maxHeight: 150,
+    marginBottom: spacing.md,
+  },
+  parentFolderOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: spacing.sm,
+    borderRadius: borderRadius.sm,
+    marginBottom: spacing.xs,
+    backgroundColor: colors.backgroundLighter,
+    gap: spacing.sm,
+  },
+  parentFolderOptionSelected: {
+    backgroundColor: colors.primary + '30',
+    borderWidth: 1,
+    borderColor: colors.primary,
+  },
+  parentFolderOptionText: {
+    color: colors.textPrimary,
+    fontSize: fontSize.sm,
   },
 });
 

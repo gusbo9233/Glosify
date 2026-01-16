@@ -52,7 +52,7 @@ const AnkiPracticeScreen: React.FC<AnkiPracticeScreenProps> = ({ onClose }) => {
         cardMode,
         practiceSettings.direction
       );
-      // Combine due cards and new cards, due first
+      // Include both due cards and new cards (due first, then new)
       const allCards = [...response.due_cards, ...response.new_cards];
       setCards(allCards);
       setStats({
@@ -66,6 +66,20 @@ const AnkiPracticeScreen: React.FC<AnkiPracticeScreenProps> = ({ onClose }) => {
     } catch (error) {
       console.error('Failed to load Anki cards:', error);
     } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleResetAnki = async () => {
+    if (!selectedQuiz) return;
+    
+    setIsLoading(true);
+    try {
+      const cardMode = practiceSettings.mode === 'sentences' ? 'sentences' : 'words';
+      await quizService.resetAnki(selectedQuiz.id, cardMode, practiceSettings.direction);
+      await loadCards();
+    } catch (error) {
+      console.error('Failed to reset Anki:', error);
       setIsLoading(false);
     }
   };
@@ -95,12 +109,23 @@ const AnkiPracticeScreen: React.FC<AnkiPracticeScreenProps> = ({ onClose }) => {
         await quizService.reviewWord(currentCard.id, rating, practiceSettings.direction);
       }
       
+      // If "Again" (rating 1), re-add card to end of queue for this session
+      if (rating === 1) {
+        setCards(prev => [...prev, currentCard]);
+      }
+      
       // Move to next card
       const nextIndex = currentIndex + 1;
       setStats(prev => ({ ...prev, reviewed: prev.reviewed + 1 }));
       
-      if (nextIndex >= cards.length) {
+      if (nextIndex >= cards.length && rating !== 1) {
+        // Only finish if we didn't just add a card back
         setIsFinished(true);
+      } else if (nextIndex >= cards.length && rating === 1) {
+        // Card was re-added, continue to it
+        setCurrentIndex(nextIndex);
+        setShowAnswer(false);
+        flipAnim.setValue(0);
       } else {
         setCurrentIndex(nextIndex);
         setShowAnswer(false);
@@ -217,7 +242,11 @@ const AnkiPracticeScreen: React.FC<AnkiPracticeScreenProps> = ({ onClose }) => {
             <Text style={styles.finishButtonText}>Done</Text>
           </TouchableOpacity>
           <TouchableOpacity style={styles.restartButton} onPress={loadCards}>
-            <Text style={styles.restartButtonText}>Start New Session</Text>
+            <Text style={styles.restartButtonText}>Check for Due Cards</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.resetButton} onPress={handleResetAnki}>
+            <Ionicons name="refresh" size={18} color={colors.error} />
+            <Text style={styles.resetButtonText}>Reset All Cards</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -603,6 +632,17 @@ const styles = StyleSheet.create({
   },
   restartButtonText: {
     color: colors.primary,
+    fontSize: fontSize.md,
+  },
+  resetButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: spacing.lg,
+    padding: spacing.md,
+    gap: spacing.xs,
+  },
+  resetButtonText: {
+    color: colors.error,
     fontSize: fontSize.md,
   },
 });

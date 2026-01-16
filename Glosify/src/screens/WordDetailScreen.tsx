@@ -154,8 +154,8 @@ const WordDetailScreen: React.FC<WordDetailScreenProps> = ({ onBack }) => {
 
         {!isEditing ? (
           <>
-            <Text style={styles.lemma}>{selectedWord.lemma}</Text>
-            <Text style={styles.translation}>{selectedWord.translation}</Text>
+        <Text style={styles.lemma}>{selectedWord.lemma}</Text>
+        <Text style={styles.translation}>{selectedWord.translation}</Text>
           </>
         ) : (
           <View style={styles.editHeaderFields}>
@@ -243,7 +243,7 @@ const WordDetailScreen: React.FC<WordDetailScreenProps> = ({ onBack }) => {
       )}
 
       {/* Variants */}
-      <View style={styles.section}>
+        <View style={styles.section}>
         <View style={styles.variantsHeaderRow}>
           <Text style={styles.sectionTitle}>Variants</Text>
           {isEditing && (
@@ -332,8 +332,8 @@ const WordDetailScreen: React.FC<WordDetailScreenProps> = ({ onBack }) => {
                 </TouchableOpacity>
               </View>
             ))}
-          </View>
-        )}
+        </View>
+      )}
       </View>
 
       {/* Quick Actions */}

@@ -47,7 +47,8 @@ export const quizService = {
     name: string,
     sourceLanguage?: string,
     targetLanguage?: string,
-    prompt?: string
+    prompt?: string,
+    folderId?: number
   ): Promise<Quiz> {
     try {
       const response = await apiClient.post('/api/quizzes', {
@@ -55,6 +56,7 @@ export const quizService = {
         source_language: sourceLanguage,
         target_language: targetLanguage,
         prompt,
+        folder_id: folderId,
       });
       return response.data.quiz;
     } catch (error) {
@@ -274,6 +276,20 @@ export const quizService = {
       return response.data;
     } catch (error) {
       console.error('Error reviewing sentence:', error);
+      throw error;
+    }
+  },
+
+  // Reset Anki progress for all cards in a quiz
+  async resetAnki(
+    quizId: number,
+    mode: 'words' | 'sentences' = 'words',
+    direction: 'forward' | 'reverse' = 'forward'
+  ): Promise<void> {
+    try {
+      await apiClient.post(`/api/quiz/${quizId}/reset-anki`, { mode, direction });
+    } catch (error) {
+      console.error('Error resetting Anki:', error);
       throw error;
     }
   },

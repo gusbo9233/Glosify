@@ -221,8 +221,8 @@ const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
     }
     
     // Clear fields immediately for smooth UX
-    setNewLemma('');
-    setNewTranslation('');
+      setNewLemma('');
+      setNewTranslation('');
     
     // Add word in background (non-blocking, allows multiple concurrent additions)
     addWordToQuiz(selectedQuiz.id, lemma, translation)
@@ -337,8 +337,8 @@ const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
               setPollIntervalRef(null);
               setIsImporting(false);
               if (updatedQuiz.quiz.processing_status !== 'cancelled') {
-                setImportContent('');
-                setImportContext('');
+        setImportContent('');
+        setImportContext('');
               }
             }
           } catch (error) {
@@ -587,7 +587,7 @@ const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
                 size={14} 
                 color={practiceSettings.direction === 'reverse' ? colors.background : colors.textSecondary} 
               />
-            </TouchableOpacity>
+          </TouchableOpacity>
           </View>
 
           {/* Select/Deselect All */}
@@ -684,13 +684,13 @@ const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
               />
               
               {/* Import Button */}
-              <TouchableOpacity
-                style={[styles.importButton, isImporting && styles.importButtonDisabled]}
-                onPress={handleImportText}
+            <TouchableOpacity
+              style={[styles.importButton, isImporting && styles.importButtonDisabled]}
+              onPress={handleImportText}
                 disabled={isImporting || !importContent.trim()}
-              >
-                <Text style={styles.importButtonText}>
-                  {isImporting ? 'Processing...' : '🚀 Import Words from Text'}
+            >
+              <Text style={styles.importButtonText}>
+                {isImporting ? 'Processing...' : '🚀 Import Words from Text'}
                 </Text>
               </TouchableOpacity>
 
@@ -728,7 +728,7 @@ const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
                       Platform.OS === 'web' ? {} : styles.imageButtonTextSecondary
                     ]}>
                       {Platform.OS === 'web' ? 'Choose Image' : 'Choose Photo'}
-                    </Text>
+              </Text>
                   </TouchableOpacity>
                 </View>
               </View>
@@ -749,8 +749,8 @@ const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
                     >
                       <Ionicons name="close-circle" size={20} color={colors.error} />
                       <Text style={styles.cancelButtonText}>Cancel</Text>
-                    </TouchableOpacity>
-                  </View>
+            </TouchableOpacity>
+          </View>
                 </View>
               )}
             </View>
@@ -804,21 +804,21 @@ const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
         </View>
 
         {practiceSettings.mode === 'sentences' ? (
-          <FlatList
+        <FlatList
             data={sentences}
-            keyExtractor={(item) => item.id.toString()}
-            renderItem={({ item, index }) => (
+          keyExtractor={(item) => item.id.toString()}
+          renderItem={({ item, index }) => (
               <SentenceItem
                 sentence={item}
-                index={index}
+              index={index}
                 isSelected={selectedSentenceIds.has(item.id)}
-                onPress={() => {}}
+              onPress={() => {}}
                 onToggleSelect={() => handleToggleSentence(item.id)}
-              />
-            )}
-            ListEmptyComponent={
-              <View style={styles.emptyWords}>
-                <Text style={styles.emptyWordsText}>
+            />
+          )}
+          ListEmptyComponent={
+            <View style={styles.emptyWords}>
+              <Text style={styles.emptyWordsText}>
                   No sentences in this quiz yet.
                 </Text>
               </View>
@@ -874,18 +874,18 @@ const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
               <View style={styles.emptyWords}>
                 <Text style={styles.emptyWordsText}>
                   No words in this quiz yet.
-                </Text>
-                <TouchableOpacity
-                  style={styles.addFirstWord}
-                  onPress={() => setShowAddWord(true)}
-                >
-                  <Ionicons name="add" size={20} color={colors.primary} />
-                  <Text style={styles.addFirstWordText}>Add your first word</Text>
-                </TouchableOpacity>
-              </View>
-            }
-            showsVerticalScrollIndicator={false}
-          />
+              </Text>
+              <TouchableOpacity
+                style={styles.addFirstWord}
+                onPress={() => setShowAddWord(true)}
+              >
+                <Ionicons name="add" size={20} color={colors.primary} />
+                <Text style={styles.addFirstWordText}>Add your first word</Text>
+              </TouchableOpacity>
+            </View>
+          }
+          showsVerticalScrollIndicator={false}
+        />
         )}
       </View>
 
