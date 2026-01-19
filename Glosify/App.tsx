@@ -21,12 +21,13 @@ import AnkiPracticeScreen from './src/screens/AnkiPracticeScreen';
 import LoginScreen from './src/screens/LoginScreen';
 import RegisterScreen from './src/screens/RegisterScreen';
 import HomeScreen from './src/screens/HomeScreen';
+import ExploreScreen from './src/screens/ExploreScreen';
 import { Word, Quiz } from './src/types';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const isTablet = SCREEN_WIDTH > 768;
 
-type Screen = 'home' | 'quiz' | 'word' | 'practice' | 'anki';
+type Screen = 'home' | 'quiz' | 'word' | 'practice' | 'anki' | 'explore';
 type AuthScreen = 'login' | 'register';
 
 const MainApp: React.FC = () => {
@@ -39,12 +40,15 @@ const MainApp: React.FC = () => {
     startPractice,
     stopPractice,
     isPracticing,
+    updatePracticeSettings,
+    loadFolders,
   } = useApp();
 
   const [currentScreen, setCurrentScreen] = useState<Screen>('home');
   const [authScreen, setAuthScreen] = useState<AuthScreen>('login');
   const [showSidebar, setShowSidebar] = useState(false);
   const [selectedWordIds, setSelectedWordIds] = useState<Set<number>>(new Set());
+  const [selectedWordIdsForAnki, setSelectedWordIdsForAnki] = useState<Set<number>>(new Set());
   const [isAnkiMode, setIsAnkiMode] = useState(false);
 
   const handleHomeClick = () => {
@@ -68,7 +72,16 @@ const MainApp: React.FC = () => {
     setCurrentScreen('practice');
   };
 
-  const handleStartAnkiPractice = () => {
+  const handleStartAnkiPractice = (wordIds: Set<number>) => {
+    setSelectedWordIdsForAnki(wordIds);
+    setIsAnkiMode(true);
+  };
+
+  const handleStartAnkiFromHome = async (quiz: Quiz, mode: 'words' | 'sentences') => {
+    await selectQuiz(quiz);
+    updatePracticeSettings({ mode });
+    // When starting from home, use empty set to include all words
+    setSelectedWordIdsForAnki(new Set());
     setIsAnkiMode(true);
   };
 
@@ -84,7 +97,7 @@ const MainApp: React.FC = () => {
   const handleBackFromWord = () => {
     selectWord(null);
     if (selectedQuiz) {
-      setCurrentScreen('quiz');
+    setCurrentScreen('quiz');
     } else {
       setCurrentScreen('home');
     }
@@ -128,7 +141,7 @@ const MainApp: React.FC = () => {
     return (
       <SafeAreaView style={styles.container}>
         <StatusBar barStyle="light-content" backgroundColor={colors.background} />
-        <AnkiPracticeScreen onClose={handleCloseAnkiPractice} />
+        <AnkiPracticeScreen onClose={handleCloseAnkiPractice} selectedWordIds={selectedWordIdsForAnki} />
       </SafeAreaView>
     );
   }
@@ -186,6 +199,18 @@ const MainApp: React.FC = () => {
           {currentScreen === 'home' && (
             <HomeScreen 
               onQuizPress={handleQuizPress}
+              onStartAnkiPress={handleStartAnkiFromHome}
+              onExplorePress={() => setCurrentScreen('explore')}
+            />
+          )}
+          {currentScreen === 'explore' && (
+            <ExploreScreen
+              onQuizPress={handleQuizPress}
+              onBack={() => {
+                setCurrentScreen('home');
+                // Reload folders to show any new subscriptions
+                loadFolders();
+              }}
             />
           )}
           {currentScreen === 'quiz' && (

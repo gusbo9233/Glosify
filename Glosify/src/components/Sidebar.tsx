@@ -8,7 +8,6 @@ import {
   TextInput,
   Modal,
   Dimensions,
-  Picker,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, fontSize, borderRadius, shadows } from '../utils/theme';
@@ -61,8 +60,8 @@ const Sidebar: React.FC<SidebarProps> = ({ onClose, onQuizSelect, onHomeClick })
     if (!query.trim()) return folderList;
     
     const lowerQuery = query.toLowerCase();
-    
-    return folderList.map(folder => {
+
+    return folderList.reduce<Folder[]>((results, folder) => {
       // Filter quizzes in this folder
       const matchingQuizzes = folder.quizzes.filter(q => 
         q.name.toLowerCase().includes(lowerQuery)
@@ -73,15 +72,15 @@ const Sidebar: React.FC<SidebarProps> = ({ onClose, onQuizSelect, onHomeClick })
       
       // Include folder if it has matching quizzes or matching subfolders
       if (matchingQuizzes.length > 0 || filteredSubfolders.length > 0) {
-        return {
+        results.push({
           ...folder,
           quizzes: matchingQuizzes,
           subfolders: filteredSubfolders,
           isExpanded: true, // Auto-expand when searching
-        };
+        });
       }
-      return null;
-    }).filter((f): f is Folder => f !== null);
+      return results;
+    }, []);
   };
 
   const filteredFolders = filterFoldersBySearch(folders, searchQuery);
@@ -564,7 +563,15 @@ const Sidebar: React.FC<SidebarProps> = ({ onClose, onQuizSelect, onHomeClick })
                     <Ionicons name="home-outline" size={18} color={colors.textSecondary} />
                     <Text style={styles.parentFolderOptionText}>Root (no folder)</Text>
                   </TouchableOpacity>
-                  {getAllFoldersFlat(folders).filter(f => f.id !== null).map((folderOption) => (
+                  {getAllFoldersFlat(folders)
+                    .filter(f => {
+                      // Filter out subscriptions folder - only subscriptions can be placed there
+                      if (f.name === 'subscriptions') {
+                        return false;
+                      }
+                      return f.id !== null;
+                    })
+                    .map((folderOption) => (
                     <TouchableOpacity
                       key={folderOption.id}
                       style={[
@@ -756,7 +763,16 @@ const Sidebar: React.FC<SidebarProps> = ({ onClose, onQuizSelect, onHomeClick })
                 <Ionicons name="home-outline" size={18} color={colors.textSecondary} />
                 <Text style={styles.folderOptionText}>Root (no folder)</Text>
               </TouchableOpacity>
-              {getAllFoldersFlat(folders).map((folderOption) => (
+              {getAllFoldersFlat(folders)
+                .filter(folderOption => {
+                  // Filter out subscriptions folder for non-subscription quizzes
+                  // Only subscriptions (with original_quiz_id) can be in subscriptions folder
+                  if (quizToMove && quizToMove.original_quiz_id === undefined && folderOption.name === 'subscriptions') {
+                    return false;
+                  }
+                  return true;
+                })
+                .map((folderOption) => (
                 <TouchableOpacity
                   key={folderOption.id ?? 'root'}
                   style={[
@@ -1091,8 +1107,15 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
     maxHeight: 200,
-    elevation: 10, // Android shadow
     ...shadows.lg,
+  },
+  quizActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  actionButton: {
+    padding: spacing.xs,
   },
   dropdownOption: {
     padding: spacing.md,

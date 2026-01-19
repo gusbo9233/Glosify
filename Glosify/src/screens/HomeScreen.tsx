@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -20,6 +20,7 @@ const isTablet = SCREEN_WIDTH > 768;
 interface HomeScreenProps {
   onQuizPress: (quiz: Quiz) => void;
   onStartAnkiPress: (quiz: Quiz, mode: 'words' | 'sentences') => void;
+  onExplorePress: () => void;
 }
 
 // Helper to get all quizzes including those in nested folders
@@ -35,11 +36,15 @@ const getAllQuizzesFromFolders = (folderList: Folder[]): Quiz[] => {
 const HomeScreen: React.FC<HomeScreenProps> = ({ 
   onQuizPress,
   onStartAnkiPress,
+  onExplorePress,
 }) => {
   const { quizzes, folders, user } = useApp();
   
   // Get all quizzes (root level + from all folders)
-  const allQuizzes = [...quizzes, ...getAllQuizzesFromFolders(folders)];
+  const allQuizzes = useMemo(
+    () => [...quizzes, ...getAllQuizzesFromFolders(folders)],
+    [quizzes, folders]
+  );
   const [ankiStats, setAnkiStats] = useState<{
     total_due: number;
     total_new: number;
@@ -55,6 +60,17 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
   const [loadingAnki, setLoadingAnki] = useState(true);
 
   // Fetch Anki statistics
+  const ankiStatsKey = useMemo(
+    () =>
+      allQuizzes
+        .map(
+          (quiz) =>
+            `${quiz.id}:${quiz.words?.length || 0}:${quiz.sentences?.length || 0}`
+        )
+        .join('|'),
+    [allQuizzes]
+  );
+
   useEffect(() => {
     const fetchAnkiStats = async () => {
       try {
@@ -72,7 +88,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
     } else {
       setLoadingAnki(false);
     }
-  }, [allQuizzes.length]);
+  }, [ankiStatsKey, allQuizzes.length]);
 
   // Calculate statistics
   const totalQuizzes = allQuizzes.length;
@@ -86,10 +102,21 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
       {/* Welcome Section */}
       <View style={styles.welcomeSection}>
-        <Text style={styles.welcomeTitle}>Welcome back{user ? `, ${user.username}` : ''}!</Text>
-        <Text style={styles.welcomeSubtitle}>
-          Continue learning with your vocabulary quizzes
-        </Text>
+        <View style={styles.welcomeHeader}>
+          <View style={styles.welcomeTextContainer}>
+            <Text style={styles.welcomeTitle}>Welcome back{user ? `, ${user.username}` : ''}!</Text>
+            <Text style={styles.welcomeSubtitle}>
+              Continue learning with your vocabulary quizzes
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={styles.exploreButton}
+            onPress={onExplorePress}
+          >
+            <Ionicons name="globe" size={20} color={colors.primary} />
+            <Text style={styles.exploreButtonText}>Explore</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* Statistics Cards */}
@@ -160,7 +187,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
                     key={quiz.id}
                     style={styles.quizWithDueItem}
                     onPress={() => {
-                      const foundQuiz = quizzes.find(q => q.id === quiz.id);
+                      const foundQuiz = allQuizzes.find(q => q.id === quiz.id);
                       if (foundQuiz) {
                         const defaultMode = quiz.due_words > 0 ? 'words' : 'sentences';
                         onStartAnkiPress(foundQuiz, defaultMode);
@@ -174,7 +201,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
                         <TouchableOpacity
                           style={styles.dueBadge}
                           onPress={() => {
-                            const foundQuiz = quizzes.find(q => q.id === quiz.id);
+                            const foundQuiz = allQuizzes.find(q => q.id === quiz.id);
                             if (foundQuiz) onStartAnkiPress(foundQuiz, 'words');
                           }}
                           activeOpacity={0.8}
@@ -186,7 +213,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
                         <TouchableOpacity
                           style={styles.dueBadge}
                           onPress={() => {
-                            const foundQuiz = quizzes.find(q => q.id === quiz.id);
+                            const foundQuiz = allQuizzes.find(q => q.id === quiz.id);
                             if (foundQuiz) onStartAnkiPress(foundQuiz, 'sentences');
                           }}
                           activeOpacity={0.8}
@@ -271,6 +298,14 @@ const styles = StyleSheet.create({
     padding: spacing.xl,
     paddingTop: spacing.xxl,
   },
+  welcomeHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+  },
+  welcomeTextContainer: {
+    flex: 1,
+  },
   welcomeTitle: {
     fontSize: fontSize.xxxl,
     fontWeight: 'bold',
@@ -280,6 +315,22 @@ const styles = StyleSheet.create({
   welcomeSubtitle: {
     fontSize: fontSize.md,
     color: colors.textSecondary,
+  },
+  exploreButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    backgroundColor: colors.primary + '20',
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.primary,
+  },
+  exploreButtonText: {
+    color: colors.primary,
+    fontSize: fontSize.sm,
+    fontWeight: '600',
   },
   statsContainer: {
     flexDirection: 'row',

@@ -1,29 +1,51 @@
 from flask import Flask, render_template, url_for, redirect, request, flash, jsonify
-from flask_sqlalchemy import SQLAlchemy
-from flask_login import UserMixin, login_user, LoginManager, login_required, logout_user, current_user
+from flask_login import login_user, LoginManager, login_required, logout_user, current_user
 from flask_wtf import FlaskForm
 from flask_cors import CORS
-from wtforms import StringField, PasswordField, SubmitField, TextAreaField
-from wtforms.validators import InputRequired, Length, ValidationError
 from flask_bcrypt import Bcrypt
 from datetime import datetime, timedelta
-import json
 import re
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
 from gptcaller import get_gpt_caller, convert_to_word_class
-from gptcaller_polish import get_gpt_caller_polish, convert_to_word_class as convert_to_word_class_polish
-from gptcaller_prompt import get_gpt_caller_prompt
 from utils import parse_tags_from_string, words_to_dict_list, sentences_to_dict_list
+from services.quiz_processing import (
+    QuizProcessingDeps,
+    process_text_import_background,
+    process_prompt_import_background,
+    process_image_import_background
+)
+from services.anki import calculate_sm2
+from database import db
 
 app = Flask(__name__)
 
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///database.db"
-app.config["SECRET_KEY"] = "thisisasecretkey"
+app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "thisisasecretkey")
 bcrypt = Bcrypt(app)
-db = SQLAlchemy(app)
+db.init_app(app)
+from models.user import User
+from models.folder import Folder
+from models.quiz import Quiz
+from models.word import Word
+from models.variant import Variant
+from models.sentence import Sentence
+quiz_processing_deps = QuizProcessingDeps(
+    app=app,
+    db=db,
+    Quiz=Quiz,
+    Word=Word,
+    Sentence=Sentence,
+    Variant=Variant
+)
+from forms import RegisterForm, LoginForm, QuizForm, TextImportForm, WordForm, VariantForm
 # Enable CORS for mobile app
-CORS(app, supports_credentials=True, origins=["*"])
+cors_origins = os.getenv("CORS_ORIGINS")
+if cors_origins:
+    origins = [origin.strip() for origin in cors_origins.split(",") if origin.strip()]
+else:
+    origins = "*"
+CORS(app, supports_credentials=True, origins=origins)
 
 login_manager = LoginManager()
 login_manager.init_app(app)
@@ -54,436 +76,6 @@ def dashboard():
 
 
 
-def process_text_import_background(quiz_id, content, language, context=""):
-    """Background function to process any text and extract vocabulary using GPT."""
-    with app.app_context():
-        quiz = db.session.get(Quiz, quiz_id)
-        if not quiz:
-            return
-        
-        try:
-            # Update status to processing
-            quiz.processing_status = 'processing'
-            quiz.processing_message = 'Extracting vocabulary with AI...'
-            db.session.commit()
-            
-            # Quiz languages:
-            # source_language = what user knows (English/Swedish)
-            # target_language = what user is learning/practicing (ALWAYS Ukrainian/Polish)
-            
-            # Get learning direction from quiz
-            user_knows = quiz.source_language or "English"  # What user knows
-            user_learning = quiz.target_language or "Ukrainian"  # What user is learning (ALWAYS Ukrainian/Polish)
-            
-            # Use appropriate GPT caller based on target language
-            # Polish uses a specialized caller tailored for Polish textbook content
-            is_polish = user_learning == "Polish"
-            if is_polish:
-                caller = get_gpt_caller_polish()
-                word_converter = convert_to_word_class_polish
-            else:
-                # Ukrainian and other languages use the standard caller
-                caller = get_gpt_caller()
-                word_converter = convert_to_word_class
-            
-            # Determine word pair direction based on text language
-            slavic_languages = ["Polish", "Ukrainian", "Russian", "Czech", "Slovak", "Bulgarian", "Serbian", "Croatian", "Slovenian"]
-            text_is_slavic = language in slavic_languages
-            
-            # ALWAYS extract word pairs in the learning direction:
-            # - If text is Ukrainian/Polish → extract: Ukrainian/Polish words → English/Swedish translations
-            # - If text is English/Swedish → extract: English/Swedish words → Ukrainian/Polish translations
-            # The target_language (Ukrainian/Polish) is ALWAYS what we're practicing
-            if text_is_slavic:
-                # Text is in the language being learned (Ukrainian/Polish)
-                # Extract: target_language words → source_language translations
-                gpt_source_lang = user_learning  # Ukrainian/Polish word (lemma) - ALWAYS generate variants for this
-                gpt_target_lang = user_knows  # English/Swedish translation
-            else:
-                # Text is in the language user knows (English/Swedish)
-                # Extract: source_language words → target_language translations
-                gpt_source_lang = user_knows  # English/Swedish word (lemma) - no variants
-                gpt_target_lang = user_learning  # Ukrainian/Polish translation - but variants generated for target language words
-            
-            # Use GPT to extract vocabulary from the text
-            extracted = caller.extract_vocabulary_from_text(
-                content, 
-                language, 
-                context,
-                source_language=gpt_source_lang,
-                target_language=gpt_target_lang
-            )
-            
-            quiz.processing_message = f'Found {len(extracted.words)} words, {len(extracted.sentences)} sentences. Processing...'
-            db.session.commit()
-            
-            # Check for cancellation after extraction
-            db.session.refresh(quiz)
-            if quiz.processing_status == 'cancelled':
-                return
-            
-            # Save sentences and create word-to-sentence mapping
-            saved_sentences = []
-            for sent in extracted.sentences:
-                new_sentence = Sentence(
-                    text=sent.text,
-                    translation=sent.translation,
-                    quiz_id=quiz_id
-                )
-                db.session.add(new_sentence)
-                saved_sentences.append({
-                    'text': sent.text,
-                    'translation': sent.translation
-                })
-            db.session.commit()
-            
-            # Create mapping of words to sentences they appear in
-            # This will be used to assign example sentences from the text
-            word_to_sentence_map = {}
-            for word_item in extracted.words:
-                lemma = word_item.lemma.lower()
-                # Check if this word appears in any sentence
-                for sent in saved_sentences:
-                    sent_text_lower = sent['text'].lower()
-                    # For phrases (multi-word), check if the phrase appears in the sentence
-                    if ' ' in lemma or len(lemma.split()) > 1:
-                        # It's a phrase - check if the phrase appears in the sentence
-                        if lemma in sent_text_lower:
-                            # Format: "sentence" — "translation"
-                            example = f'"{sent["text"]}" — "{sent["translation"]}"'
-                            if lemma not in word_to_sentence_map:
-                                word_to_sentence_map[lemma] = example
-                            break  # Use first matching sentence
-                    else:
-                        # Single word - use word boundary matching
-                        # Also check for the word in different forms (as substring for flexibility)
-                        word_pattern = r'\b' + re.escape(lemma) + r'\b'
-                        if re.search(word_pattern, sent_text_lower):
-                            # Format: "sentence" — "translation"
-                            example = f'"{sent["text"]}" — "{sent["translation"]}"'
-                            if lemma not in word_to_sentence_map:
-                                word_to_sentence_map[lemma] = example
-                            break  # Use first matching sentence
-            
-            # Process words - get detailed analysis for each in parallel
-            max_workers = 5
-            words_added = 0
-            
-            def analyze_word(word_item):
-                """Get detailed analysis for a single word."""
-                try:
-                    # Find sentences from the text where this word appears
-                    lemma_lower = word_item.lemma.lower()
-                    word_sentences = []
-                    for sent in saved_sentences:
-                        if lemma_lower in sent['text'].lower():
-                            word_sentences.append(f'"{sent["text"]}" — "{sent["translation"]}"')
-                    
-                    # Use the same language detection logic as extraction
-                    analysis = caller.generate_word_analysis(
-                        lemma=word_item.lemma,
-                        translation=word_item.translation,
-                        language=language,
-                        context=context,
-                        sentence_context=word_sentences[:3] if word_sentences else None,  # Pass up to 3 sentences
-                        source_language=gpt_source_lang,
-                        target_language=gpt_target_lang
-                    )
-                    
-                    if analysis.is_irrelevant:
-                        return {'skip': True}
-                    
-                    word_data = word_converter(analysis, word_item.lemma)
-                    return {
-                        'skip': False,
-                        'lemma': word_item.lemma,
-                        'translation': word_item.translation,
-                        'notes': word_item.notes,
-                        'word_data': word_data
-                    }
-                except Exception as e:
-                    print(f"Error analyzing word {word_item.lemma}: {e}")
-                    # Return basic data without detailed analysis
-                    return {
-                        'skip': False,
-                        'lemma': word_item.lemma,
-                        'translation': word_item.translation,
-                        'notes': word_item.notes,
-                        'word_data': None
-                    }
-            
-            quiz.processing_message = f'Analyzing {len(extracted.words)} words in detail...'
-            db.session.commit()
-            
-            # Check for cancellation before starting word analysis
-            db.session.refresh(quiz)
-            if quiz.processing_status == 'cancelled':
-                return
-            
-            word_results = []
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_word = {
-                    executor.submit(analyze_word, word_item): word_item
-                    for word_item in extracted.words
-                }
-                
-                completed = 0
-                for future in as_completed(future_to_word):
-                    # Check for cancellation periodically
-                    db.session.refresh(quiz)
-                    if quiz.processing_status == 'cancelled':
-                        # Cancel remaining futures
-                        for f in future_to_word:
-                            f.cancel()
-                        return
-                    
-                    result = future.result()
-                    word_results.append(result)
-                    completed += 1
-                    quiz.processing_message = f'Analyzing words ({completed}/{len(extracted.words)})...'
-                    db.session.commit()
-            
-            # Check for cancellation before saving words
-            db.session.refresh(quiz)
-            if quiz.processing_status == 'cancelled':
-                return
-            
-            # Save word results
-            for result in word_results:
-                if result.get('skip'):
-                    continue
-                
-                new_word = Word(
-                    lemma=result['lemma'],
-                    translation=result['translation'],
-                    quiz_id=quiz_id
-                )
-                
-                word_data = result.get('word_data')
-                if word_data and word_data.get('properties'):
-                    new_word.set_properties(word_data['properties'])
-                else:
-                    new_word.set_properties({})
-                
-                # Priority for example sentence:
-                # 1. Sentence from the text (if word appears in any extracted sentence)
-                # 2. Notes from extraction
-                # 3. Example sentence from GPT analysis
-                lemma_lower = result['lemma'].lower()
-                if lemma_lower in word_to_sentence_map:
-                    new_word.example_sentence = word_to_sentence_map[lemma_lower]
-                elif result.get('notes'):
-                    new_word.example_sentence = result['notes']
-                elif word_data and word_data.get('example_sentence'):
-                    new_word.example_sentence = word_data['example_sentence']
-                
-                # Set explanation from GPT analysis
-                if word_data and word_data.get('explanation'):
-                    new_word.explanation = word_data['explanation']
-                
-                db.session.add(new_word)
-                db.session.flush()
-                
-                # Add variants if available
-                if word_data and word_data.get('variants'):
-                    for variant_data in word_data['variants']:
-                        new_variant = Variant(
-                            value=variant_data['value'],
-                            translation=variant_data['translation'],
-                            word_id=new_word.id
-                        )
-                        if variant_data.get('tags'):
-                            new_variant.set_tags(variant_data['tags'])
-                        db.session.add(new_variant)
-                
-                words_added += 1
-            
-            db.session.commit()
-            
-            # Mark as completed
-            quiz.processing_status = 'completed'
-            quiz.processing_message = f'Completed! {words_added} words and {len(extracted.sentences)} sentences.'
-            db.session.commit()
-            
-        except Exception as e:
-            print(f"Error processing quiz {quiz_id}: {e}")
-            import traceback
-            traceback.print_exc()
-            quiz.processing_status = 'error'
-            quiz.processing_message = f'Error: {str(e)[:100]}'
-            db.session.commit()
-
-
-def process_prompt_import_background(quiz_id, prompt, source_language, target_language, context=""):
-    """Background function to generate vocabulary from a prompt and process it."""
-    with app.app_context():
-        quiz = db.session.get(Quiz, quiz_id)
-        if not quiz:
-            return
-        
-        try:
-            # Update status
-            quiz.processing_status = 'processing'
-            quiz.processing_message = 'Generating vocabulary from prompt...'
-            db.session.commit()
-            
-            # Stage 1: Generate word pairs from prompt
-            prompt_caller = get_gpt_caller_prompt()
-            prompt_vocab = prompt_caller.generate_vocabulary_from_prompt(
-                prompt=prompt,
-                source_language=target_language,  # The language being learned (Polish/Ukrainian)
-                target_language=source_language   # The language user knows (English/Swedish)
-            )
-            
-            quiz.processing_message = f'Generated {len(prompt_vocab.words)} words. Analyzing in detail...'
-            db.session.commit()
-            
-            # Check for cancellation after prompt generation
-            db.session.refresh(quiz)
-            if quiz.processing_status == 'cancelled':
-                return
-            
-            # Stage 2: Use appropriate caller for full analysis
-            is_polish = target_language == "Polish"
-            if is_polish:
-                analysis_caller = get_gpt_caller_polish()
-                word_converter = convert_to_word_class_polish
-            else:
-                analysis_caller = get_gpt_caller()
-                word_converter = convert_to_word_class
-            
-            # Process each word pair through full analysis
-            max_workers = 5
-            word_results = []
-            
-            def analyze_word(word_pair):
-                """Get detailed analysis for a word pair."""
-                try:
-                    analysis = analysis_caller.generate_word_analysis(
-                        lemma=word_pair.lemma,
-                        translation=word_pair.translation,
-                        language=target_language,
-                        context=context,
-                        source_language=target_language,
-                        target_language=source_language
-                    )
-                    
-                    if analysis.is_irrelevant:
-                        return {'skip': True}
-                    
-                    word_data = word_converter(analysis, word_pair.lemma)
-                    return {
-                        'skip': False,
-                        'lemma': word_pair.lemma,
-                        'translation': word_pair.translation,
-                        'notes': word_pair.notes,
-                        'word_data': word_data
-                    }
-                except Exception as e:
-                    print(f"Error analyzing word {word_pair.lemma}: {e}")
-                    return {
-                        'skip': False,
-                        'lemma': word_pair.lemma,
-                        'translation': word_pair.translation,
-                        'notes': word_pair.notes,
-                        'word_data': None
-                    }
-            
-            quiz.processing_message = f'Analyzing {len(prompt_vocab.words)} words in detail...'
-            db.session.commit()
-            
-            # Process words in parallel
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_word = {
-                    executor.submit(analyze_word, word_pair): word_pair
-                    for word_pair in prompt_vocab.words
-                }
-                
-                completed = 0
-                for future in as_completed(future_to_word):
-                    # Check for cancellation periodically
-                    db.session.refresh(quiz)
-                    if quiz.processing_status == 'cancelled':
-                        for f in future_to_word:
-                            f.cancel()
-                        return
-                    
-                    result = future.result()
-                    word_results.append(result)
-                    completed += 1
-                    quiz.processing_message = f'Analyzing words ({completed}/{len(prompt_vocab.words)})...'
-                    db.session.commit()
-            
-            # Check for cancellation before saving words
-            db.session.refresh(quiz)
-            if quiz.processing_status == 'cancelled':
-                return
-            
-            # Save words to database (similar to text import)
-            words_added = 0
-            for result in word_results:
-                if result.get('skip'):
-                    continue
-                
-                new_word = Word(
-                    lemma=result['lemma'],
-                    translation=result['translation'],
-                    quiz_id=quiz_id
-                )
-                
-                word_data = result.get('word_data')
-                if word_data and word_data.get('properties'):
-                    new_word.set_properties(word_data['properties'])
-                else:
-                    new_word.set_properties({})
-                
-                # Use notes from prompt generation if available
-                if result.get('notes'):
-                    new_word.example_sentence = result['notes']
-                elif word_data and word_data.get('example_sentence'):
-                    new_word.example_sentence = word_data['example_sentence']
-                
-                # Set explanation from GPT analysis
-                if word_data and word_data.get('explanation'):
-                    new_word.explanation = word_data['explanation']
-                
-                db.session.add(new_word)
-                db.session.flush()
-                
-                # Add variants if available
-                if word_data and word_data.get('variants'):
-                    for variant_data in word_data['variants']:
-                        new_variant = Variant(
-                            value=variant_data['value'],
-                            translation=variant_data['translation'],
-                            word_id=new_word.id
-                        )
-                        if variant_data.get('tags'):
-                            new_variant.set_tags(variant_data['tags'])
-                        db.session.add(new_variant)
-                
-                words_added += 1
-            
-            db.session.commit()
-            
-            # Mark as completed
-            quiz.processing_status = 'completed'
-            quiz.processing_message = f'Completed! {words_added} words generated.'
-            db.session.commit()
-            
-        except Exception as e:
-            print(f"Error processing prompt for quiz {quiz_id}: {e}")
-            quiz.processing_status = 'error'
-            quiz.processing_message = f'Error: {str(e)[:100]}'
-            db.session.commit()
-
-
-# Backward compatibility alias
-def process_song_quiz_background(quiz_id, lyrics, language, context=""):
-    """Legacy function - calls the new generalized version."""
-    process_text_import_background(quiz_id, lyrics, language, context)
-
-
 @app.route("/create-song-quiz", methods=["GET", "POST"])
 @app.route("/import-text", methods=["GET", "POST"])
 @login_required
@@ -508,7 +100,7 @@ def create_song_quiz():
         context = form.context.data.strip() if form.context.data else ""
         thread = threading.Thread(
             target=process_text_import_background,
-            args=(new_quiz.id, content, language, context),
+            args=(quiz_processing_deps, new_quiz.id, content, language, context),
             daemon=True
         )
         thread.start()
@@ -782,171 +374,6 @@ def logout():
     return redirect(url_for("login"))
 
 
-class User(db.Model, UserMixin):
-    id = db.Column(db.Integer, primary_key=True, unique=True)
-    username = db.Column(db.String(20), nullable=False)
-    password = db.Column(db.String(80), nullable=False)
-    quizzes = db.relationship('Quiz', backref='user', lazy=True, cascade='all, delete-orphan')
-    folders = db.relationship('Folder', backref='user', lazy=True, cascade='all, delete-orphan')
-
-
-class Folder(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), nullable=False)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    parent_id = db.Column(db.Integer, db.ForeignKey('folder.id'), nullable=True)  # For nested folders
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    quizzes = db.relationship('Quiz', backref='folder', lazy=True, cascade='all, delete-orphan')
-    subfolders = db.relationship('Folder', backref=db.backref('parent', remote_side=[id]), lazy=True, cascade='all, delete-orphan')
-
-
-class Quiz(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), nullable=False)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    folder_id = db.Column(db.Integer, db.ForeignKey('folder.id'), nullable=True)  # Optional: quiz can be in a folder
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    is_song_quiz = db.Column(db.Boolean, default=False)  # True if created from song lyrics
-    processing_status = db.Column(db.String(20), default='completed')  # 'pending', 'processing', 'completed', 'error'
-    processing_message = db.Column(db.String(200))  # Status message like "Processing 5/20 words..."
-    source_language = db.Column(db.String(50))  # e.g., "English"
-    target_language = db.Column(db.String(50))  # e.g., "Polish"
-    words = db.relationship('Word', backref='quiz', lazy=True, cascade='all, delete-orphan')
-    sentences = db.relationship('Sentence', backref='quiz', lazy=True, cascade='all, delete-orphan')
-
-
-class Word(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    lemma = db.Column(db.String(200), nullable=False)
-    translation = db.Column(db.String(200), nullable=False)
-    properties = db.Column(db.Text)  # JSON string storing properties like {"gender": "masc", "aspect": "impf"}
-    example_sentence = db.Column(db.String(500))  # Example sentence using the word
-    explanation = db.Column(db.Text)  # Detailed explanation of the word (can be several sentences)
-    quiz_id = db.Column(db.Integer, db.ForeignKey('quiz.id'), nullable=False)
-    variants = db.relationship('Variant', backref='word', lazy=True, cascade='all, delete-orphan')
-    
-    # Anki-style spaced repetition fields - Forward direction (show lemma, guess translation)
-    ease_factor = db.Column(db.Float, default=2.5)
-    interval = db.Column(db.Integer, default=0)
-    repetitions = db.Column(db.Integer, default=0)
-    due_date = db.Column(db.DateTime, default=datetime.utcnow)
-    
-    # Anki-style spaced repetition fields - Reverse direction (show translation, guess lemma)
-    ease_factor_reverse = db.Column(db.Float, default=2.5)
-    interval_reverse = db.Column(db.Integer, default=0)
-    repetitions_reverse = db.Column(db.Integer, default=0)
-    due_date_reverse = db.Column(db.DateTime, default=datetime.utcnow)
-
-    def get_properties(self):
-        """Parse properties from JSON string to dict."""
-        if self.properties:
-            return json.loads(self.properties)
-        return {}
-
-    def set_properties(self, properties_dict):
-        """Store properties dict as JSON string."""
-        self.properties = json.dumps(properties_dict) if properties_dict else None
-
-
-class Variant(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    value = db.Column(db.String(200), nullable=False)  # The variant form (e.g., "столу")
-    translation = db.Column(db.String(200), nullable=False)  # Translation for this variant
-    tags = db.Column(db.Text)  # JSON string storing tags like {"case": "gen", "number": "sg"}
-    word_id = db.Column(db.Integer, db.ForeignKey('word.id'), nullable=False)
-
-    def get_tags(self):
-        """Parse tags from JSON string to dict."""
-        if self.tags:
-            return json.loads(self.tags)
-        return {}
-
-    def set_tags(self, tags_dict):
-        """Store tags dict as JSON string."""
-        self.tags = json.dumps(tags_dict) if tags_dict else None
-
-
-class Sentence(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    text = db.Column(db.String(500), nullable=False)  # Original sentence/line from the song
-    translation = db.Column(db.String(500))  # Translation of the sentence
-    quiz_id = db.Column(db.Integer, db.ForeignKey('quiz.id'), nullable=False)
-    
-    # Anki-style spaced repetition fields - Forward direction (show text, guess translation)
-    ease_factor = db.Column(db.Float, default=2.5)
-    interval = db.Column(db.Integer, default=0)
-    repetitions = db.Column(db.Integer, default=0)
-    due_date = db.Column(db.DateTime, default=datetime.utcnow)
-    
-    # Anki-style spaced repetition fields - Reverse direction (show translation, guess text)
-    ease_factor_reverse = db.Column(db.Float, default=2.5)
-    interval_reverse = db.Column(db.Integer, default=0)
-    repetitions_reverse = db.Column(db.Integer, default=0)
-    due_date_reverse = db.Column(db.DateTime, default=datetime.utcnow)
-
-
-class RegisterForm(FlaskForm):
-    username = StringField(validators=[InputRequired(), Length(min=4, max=20)], render_kw={"placeholder": "Username"})
-    password = PasswordField(validators=[InputRequired(), Length(min=4, max=20)], render_kw={"placeholder": "Password"})
-    submit = SubmitField("Register")
-
-    def validate_username(self, username):
-        existing_user_username = User.query.filter_by(
-            username=username.data).first()
-        if existing_user_username:
-            raise ValidationError(
-                "User already exists"
-            )
-
-
-class LoginForm(FlaskForm):
-    username = StringField(validators=[InputRequired(), Length(min=4, max=20)], render_kw={"placeholder": "Username"})
-    password = PasswordField(validators=[InputRequired(), Length(min=4, max=20)], render_kw={"placeholder": "Password"})
-    submit = SubmitField("Login")
-
-
-class QuizForm(FlaskForm):
-    name = StringField(validators=[InputRequired(), Length(min=1, max=100)], render_kw={"placeholder": "Quiz Name"})
-    submit = SubmitField("Create Quiz")
-
-
-class TextImportForm(FlaskForm):
-    name = StringField(validators=[InputRequired(), Length(min=1, max=100)], render_kw={"placeholder": "Quiz Name"})
-    language = StringField(validators=[InputRequired(), Length(min=1, max=50)], render_kw={"placeholder": "Language (e.g., Ukrainian, Polish)"})
-    content = TextAreaField(validators=[InputRequired()], render_kw={"placeholder": "Paste any text here - song lyrics, word lists, textbook excerpts, articles...", "rows": 15})
-    context = TextAreaField(validators=[], render_kw={"placeholder": "Optional: Additional context to help with accurate translations...", "rows": 3})
-    submit = SubmitField("Create Quiz")
-
-
-# Keep old form name for backward compatibility
-SongQuizForm = TextImportForm
-
-
-class WordForm(FlaskForm):
-    lemma = StringField(validators=[Length(min=0, max=200)], render_kw={"placeholder": "Word (lemma) - optional"})
-    translation = StringField(validators=[Length(min=0, max=200)], render_kw={"placeholder": "Translation - optional"})
-    submit = SubmitField("Add Word")
-    
-    def validate(self, extra_validators=None):
-        """Ensure at least one of lemma or translation is provided."""
-        if not super().validate(extra_validators):
-            return False
-        
-        if not self.lemma.data.strip() and not self.translation.data.strip():
-            self.lemma.errors.append("At least one of lemma or translation must be provided.")
-            return False
-        
-        return True
-
-
-class VariantForm(FlaskForm):
-    value = StringField(validators=[InputRequired(), Length(min=1, max=200)], render_kw={"placeholder": "Variant form"})
-    translation = StringField(validators=[InputRequired(), Length(min=1, max=200)],
-                              render_kw={"placeholder": "Translation"})
-    tags = StringField(render_kw={"placeholder": "Tags (e.g., case=gen,number=sg)"})
-    submit = SubmitField("Add Variant")
-
-
 @app.route("/")
 def home():
     return render_template("home.html")
@@ -958,7 +385,7 @@ def register():
 
     if form.validate_on_submit():
         hashed_password = bcrypt.generate_password_hash(form.password.data)
-        new_user = User(username=form.username.data, password=hashed_password)
+        new_user = User(username=form.username.data, password=hashed_password.decode('utf-8'))
         db.session.add(new_user)
         db.session.commit()
         return redirect(url_for('login'))
@@ -997,12 +424,54 @@ def api_login():
         return jsonify({'success': False, 'message': 'Username and password required'}), 400
     
     user = User.query.filter_by(username=username).first()
-    if user and bcrypt.check_password_hash(user.password, password):
-        login_user(user)
-        return jsonify({
-            'success': True,
-            'user': {'id': user.id, 'username': user.username}
-        })
+    if user:
+        stored_password = user.password
+        if isinstance(stored_password, memoryview):
+            stored_password = stored_password.tobytes()
+        password_valid = bcrypt.check_password_hash(stored_password, password)
+
+        # Handle legacy plaintext passwords for local test accounts.
+        if not password_valid:
+            plaintext_match = False
+            if isinstance(stored_password, bytes):
+                plaintext_match = stored_password.decode('utf-8', errors='ignore') == password
+            else:
+                plaintext_match = stored_password == password
+
+            if plaintext_match:
+                user.password = bcrypt.generate_password_hash(password)
+                db.session.commit()
+                password_valid = True
+
+        # Handle hashes stored as stringified bytes (e.g. "b'...'" in DB)
+        if not password_valid:
+            if isinstance(stored_password, bytes):
+                if stored_password.startswith(b"b'") and stored_password.endswith(b"'"):
+                    normalized_hash = stored_password[2:-1].decode('utf-8', errors='ignore')
+                    if bcrypt.check_password_hash(normalized_hash, password):
+                        user.password = normalized_hash
+                        db.session.commit()
+                        password_valid = True
+                else:
+                    decoded_hash = stored_password.decode('utf-8', errors='ignore')
+                    if decoded_hash and bcrypt.check_password_hash(decoded_hash, password):
+                        user.password = decoded_hash
+                        db.session.commit()
+                        password_valid = True
+            elif isinstance(stored_password, str):
+                if stored_password.startswith("b'") and stored_password.endswith("'"):
+                    normalized_hash = stored_password[2:-1]
+                    if bcrypt.check_password_hash(normalized_hash, password):
+                        user.password = normalized_hash
+                        db.session.commit()
+                        password_valid = True
+
+        if password_valid:
+            login_user(user)
+            return jsonify({
+                'success': True,
+                'user': {'id': user.id, 'username': user.username}
+            })
     
     return jsonify({'success': False, 'message': 'Invalid credentials'}), 401
 
@@ -1028,7 +497,7 @@ def api_register():
         return jsonify({'success': False, 'message': 'Username already exists'}), 400
     
     hashed_password = bcrypt.generate_password_hash(password)
-    new_user = User(username=username, password=hashed_password)
+    new_user = User(username=username, password=hashed_password.decode('utf-8'))
     db.session.add(new_user)
     db.session.commit()
     
@@ -1054,6 +523,31 @@ def api_me():
     return jsonify({'success': False}), 401
 
 
+@app.route("/api/quizzes/public", methods=["GET"])
+def api_public_quizzes():
+    """Get all public quizzes (no authentication required)."""
+    # Get all public quizzes, ordered by creation date (newest first)
+    quizzes = Quiz.query.filter_by(is_public=True).order_by(Quiz.created_at.desc()).all()
+    
+    return jsonify({
+        'quizzes': [
+            {
+                'id': q.id,
+                'name': q.name,
+                'user_id': q.user_id,
+                'created_at': q.created_at.isoformat(),
+                'is_song_quiz': True,
+                'processing_status': q.processing_status,
+                'source_language': q.source_language,
+                'target_language': q.target_language,
+                'word_count': len(q.words),
+                'sentence_count': len(q.sentences),
+            }
+            for q in quizzes
+        ]
+    })
+
+
 @app.route("/api/quizzes", methods=["GET", "POST"])
 @login_required
 def api_quizzes():
@@ -1073,6 +567,8 @@ def api_quizzes():
                     'processing_message': q.processing_message,
                     'source_language': q.source_language,
                     'target_language': q.target_language,
+                    'anki_tracking_enabled': q.anki_tracking_enabled if hasattr(q, 'anki_tracking_enabled') else True,
+                    'is_public': q.is_public if hasattr(q, 'is_public') else False,
                     'words': [{'id': w.id, 'lemma': w.lemma, 'translation': w.translation} for w in q.words]
                 }
                 for q in quizzes
@@ -1087,12 +583,24 @@ def api_quizzes():
     source_language = data.get('source_language', '').strip() or None
     target_language = data.get('target_language', '').strip() or None
     prompt = data.get('prompt', '').strip() or None
+    folder_id = data.get('folder_id')
+    
+    # Validate folder belongs to user if provided
+    if folder_id:
+        folder = db.session.get(Folder, folder_id)
+        if not folder or folder.user_id != current_user.id:
+            return jsonify({'error': 'Invalid folder'}), 400
+        # Prevent creating quizzes directly in subscriptions folder
+        # Only subscriptions (with original_quiz_id) can be in subscriptions folder
+        if folder.name == 'subscriptions' and folder.parent_id is None:
+            return jsonify({'error': 'Cannot create quiz in subscriptions folder. Only subscribed quizzes can be placed there.'}), 400
     
     new_quiz = Quiz(
         name=data['name'],
         user_id=current_user.id,
         source_language=source_language,
-        target_language=target_language
+        target_language=target_language,
+        folder_id=folder_id
     )
     db.session.add(new_quiz)
     db.session.commit()
@@ -1106,7 +614,7 @@ def api_quizzes():
         context = data.get('context', '').strip() or ""
         thread = threading.Thread(
             target=process_prompt_import_background,
-            args=(new_quiz.id, prompt, source_language, target_language, context),
+            args=(quiz_processing_deps, new_quiz.id, prompt, source_language, target_language, context),
             daemon=True
         )
         thread.start()
@@ -1127,19 +635,56 @@ def api_quizzes():
     }), 201
 
 
-@app.route("/api/quiz/<int:quiz_id>", methods=["GET", "DELETE"])
+@app.route("/api/quiz/<int:quiz_id>", methods=["GET", "PUT", "DELETE"])
 @login_required
 def api_quiz_detail(quiz_id):
-    """Get quiz details or delete a quiz."""
+    """Get quiz details, update quiz, or delete a quiz."""
     quiz = db.session.get(Quiz, quiz_id)
     
-    if not quiz or quiz.user_id != current_user.id:
+    if not quiz:
         return jsonify({'error': 'Quiz not found'}), 404
+    
+    # For PUT and DELETE, only allow if user owns the quiz AND it's not a subscription
+    if request.method in ["PUT", "DELETE"]:
+        if quiz.user_id != current_user.id:
+            return jsonify({'error': 'Access denied'}), 403
+        # Prevent editing/deleting subscribed quizzes (they are copies)
+        if quiz.original_quiz_id is not None:
+            return jsonify({'error': 'Cannot modify subscribed quiz'}), 403
+    
+    # For GET, allow access if user owns the quiz OR if quiz is public
+    if request.method == "GET":
+        if quiz.user_id != current_user.id and not (quiz.is_public if hasattr(quiz, 'is_public') else False):
+            return jsonify({'error': 'Quiz not found'}), 404
     
     if request.method == "DELETE":
         db.session.delete(quiz)
         db.session.commit()
         return jsonify({'success': True})
+    
+    if request.method == "PUT":
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+        
+        # Update anki_tracking_enabled if provided
+        if 'anki_tracking_enabled' in data:
+            quiz.anki_tracking_enabled = bool(data['anki_tracking_enabled'])
+        
+        # Update is_public if provided
+        if 'is_public' in data:
+            quiz.is_public = bool(data['is_public'])
+        
+        db.session.commit()
+        return jsonify({
+            'success': True,
+            'quiz': {
+                'id': quiz.id,
+                'name': quiz.name,
+                'anki_tracking_enabled': quiz.anki_tracking_enabled,
+                'is_public': quiz.is_public if hasattr(quiz, 'is_public') else False
+            }
+        })
     
     # GET
     words = Word.query.filter_by(quiz_id=quiz_id).all()
@@ -1184,6 +729,9 @@ def api_quiz_detail(quiz_id):
             'processing_message': quiz.processing_message,
             'source_language': quiz.source_language,
             'target_language': quiz.target_language,
+            'anki_tracking_enabled': quiz.anki_tracking_enabled if hasattr(quiz, 'anki_tracking_enabled') else True,
+            'is_public': quiz.is_public if hasattr(quiz, 'is_public') else False,
+            'original_quiz_id': quiz.original_quiz_id if hasattr(quiz, 'original_quiz_id') else None,
         },
         'words': words_data,
         'sentences': [
@@ -1206,6 +754,10 @@ def api_add_word(quiz_id):
     
     if not quiz or quiz.user_id != current_user.id:
         return jsonify({'error': 'Quiz not found'}), 404
+    
+    # Prevent adding words to subscribed quizzes
+    if quiz.original_quiz_id is not None:
+        return jsonify({'error': 'Cannot modify subscribed quiz'}), 403
     
     data = request.get_json()
     if not data:
@@ -1328,6 +880,11 @@ def api_word_detail(word_id):
     quiz = word.quiz
     if quiz.user_id != current_user.id:
         return jsonify({'error': 'Access denied'}), 403
+    
+    # Prevent modifying words in subscribed quizzes
+    if request.method in ["DELETE", "PUT"]:
+        if quiz.original_quiz_id is not None:
+            return jsonify({'error': 'Cannot modify subscribed quiz'}), 403
     
     if request.method == "DELETE":
         db.session.delete(word)
@@ -1485,14 +1042,37 @@ def api_get_anki_cards(quiz_id):
     Query params:
         mode: 'words' (default) or 'sentences'
         direction: 'forward' (default) or 'reverse'
+        word_ids: comma-separated list of word IDs to filter (optional, only for words mode)
     """
     quiz = db.session.get(Quiz, quiz_id)
     if not quiz or quiz.user_id != current_user.id:
         return jsonify({'error': 'Quiz not found'}), 404
     
+    # If Anki tracking is disabled for this quiz, return empty results
+    if not (quiz.anki_tracking_enabled if hasattr(quiz, 'anki_tracking_enabled') else True):
+        return jsonify({
+            'due_cards': [],
+            'new_cards': [],
+            'total_due': 0,
+            'total_new': 0,
+            'total_words': 0,
+            'total_sentences': 0,
+            'mode': request.args.get('mode', 'words'),
+            'direction': request.args.get('direction', 'forward')
+        })
+    
     mode = request.args.get('mode', 'words')
     direction = request.args.get('direction', 'forward')
+    word_ids_param = request.args.get('word_ids', '')
     now = datetime.utcnow()
+    
+    # Parse word IDs if provided
+    word_ids = None
+    if word_ids_param:
+        try:
+            word_ids = set(int(id.strip()) for id in word_ids_param.split(',') if id.strip())
+        except ValueError:
+            return jsonify({'error': 'Invalid word_ids format'}), 400
     
     due_cards = []
     new_cards = []
@@ -1554,8 +1134,11 @@ def api_get_anki_cards(quiz_id):
             'direction': direction
         })
     else:
-        # Get all words (default mode)
-        words = Word.query.filter_by(quiz_id=quiz_id).all()
+        # Get words (default mode), optionally filtered by word_ids
+        query = Word.query.filter_by(quiz_id=quiz_id)
+        if word_ids is not None:
+            query = query.filter(Word.id.in_(word_ids))
+        words = query.all()
         
         for word in words:
             fields = get_anki_fields(word, is_reverse)
@@ -1579,6 +1162,7 @@ def api_get_anki_cards(quiz_id):
                 'is_due': is_due
             }
             
+            # Only include new or due cards, even when word_ids is provided
             if is_new:
                 new_cards.append(word_data)
             elif is_due:
@@ -1611,6 +1195,10 @@ def api_get_anki_stats():
     quizzes_with_due = []
     
     for quiz in quizzes:
+        # Skip quizzes with Anki tracking disabled
+        if not (quiz.anki_tracking_enabled if hasattr(quiz, 'anki_tracking_enabled') else True):
+            continue
+        
         # Count due/new words (forward direction)
         words = Word.query.filter_by(quiz_id=quiz.id).all()
         quiz_due_words = 0
@@ -1666,40 +1254,61 @@ def api_get_anki_stats():
     })
 
 
-def calculate_sm2(rating, ease_factor, interval, repetitions):
-    """SM-2 Algorithm implementation.
-    Returns (new_ease_factor, new_interval, new_repetitions)
-    """
-    if rating == 1:  # Again - complete failure
-        repetitions = 0
-        interval = 0
-        ease_factor = max(1.3, ease_factor - 0.2)
-    elif rating == 2:  # Hard
-        if repetitions == 0:
-            interval = 1
-        else:
-            interval = max(1, int(interval * 1.2))
-        ease_factor = max(1.3, ease_factor - 0.15)
-        repetitions += 1
-    elif rating == 3:  # Good
-        if repetitions == 0:
-            interval = 1
-        elif repetitions == 1:
-            interval = 6
-        else:
-            interval = int(interval * ease_factor)
-        repetitions += 1
-    elif rating == 4:  # Easy
-        if repetitions == 0:
-            interval = 4
-        elif repetitions == 1:
-            interval = 10
-        else:
-            interval = int(interval * ease_factor * 1.3)
-        ease_factor = min(3.0, ease_factor + 0.15)
-        repetitions += 1
+def api_reset_anki(quiz_id):
+    """Reset Anki progress for all cards in a quiz, making them all due.
     
-    return ease_factor, interval, repetitions
+    Body params:
+        mode: 'words' or 'sentences'
+        direction: 'forward' or 'reverse'
+    """
+    quiz = db.session.get(Quiz, quiz_id)
+    if not quiz or quiz.user_id != current_user.id:
+        return jsonify({'error': 'Quiz not found'}), 404
+    
+    data = request.get_json() or {}
+    mode = data.get('mode', 'words')
+    direction = data.get('direction', 'forward')
+    now = datetime.utcnow()
+    
+    count = 0
+    
+    if mode == 'sentences':
+        sentences = Sentence.query.filter_by(quiz_id=quiz_id).all()
+        for sentence in sentences:
+            if direction == 'reverse':
+                sentence.ease_factor_reverse = 2.5
+                sentence.interval_reverse = 0
+                sentence.repetitions_reverse = 1  # Set to 1 so it's "due" not "new"
+                sentence.due_date_reverse = now
+            else:
+                sentence.ease_factor = 2.5
+                sentence.interval = 0
+                sentence.repetitions = 1  # Set to 1 so it's "due" not "new"
+                sentence.due_date = now
+            count += 1
+    else:
+        words = Word.query.filter_by(quiz_id=quiz_id).all()
+        for word in words:
+            if direction == 'reverse':
+                word.ease_factor_reverse = 2.5
+                word.interval_reverse = 0
+                word.repetitions_reverse = 1  # Set to 1 so it's "due" not "new"
+                word.due_date_reverse = now
+            else:
+                word.ease_factor = 2.5
+                word.interval = 0
+                word.repetitions = 1  # Set to 1 so it's "due" not "new"
+                word.due_date = now
+            count += 1
+    
+    db.session.commit()
+    
+    return jsonify({
+        'success': True,
+        'reset_count': count,
+        'mode': mode,
+        'direction': direction
+    })
 
 
 @app.route("/api/word/<int:word_id>/review", methods=["POST"])
@@ -1735,42 +1344,57 @@ def api_review_word(word_id):
     if rating not in [1, 2, 3, 4]:
         return jsonify({'error': 'Rating must be 1, 2, 3, or 4'}), 400
     
-    # Get direction-specific fields
-    if direction == 'reverse':
-        ease_factor = word.ease_factor_reverse or 2.5
-        interval = word.interval_reverse or 0
-        repetitions = word.repetitions_reverse or 0
-    else:
-        ease_factor = word.ease_factor or 2.5
-        interval = word.interval or 0
-        repetitions = word.repetitions or 0
-    
-    # Apply SM-2 algorithm
-    ease_factor, interval, repetitions = calculate_sm2(rating, ease_factor, interval, repetitions)
-    due_date = datetime.utcnow() + timedelta(days=interval)
-    
-    # Update direction-specific fields
-    if direction == 'reverse':
-        word.ease_factor_reverse = ease_factor
-        word.interval_reverse = interval
-        word.repetitions_reverse = repetitions
-        word.due_date_reverse = due_date
-    else:
-        word.ease_factor = ease_factor
-        word.interval = interval
-        word.repetitions = repetitions
-        word.due_date = due_date
+    # Only update Anki tracking if enabled for this quiz
+    if quiz.anki_tracking_enabled:
+        # Get direction-specific fields
+        if direction == 'reverse':
+            ease_factor = word.ease_factor_reverse or 2.5
+            interval = word.interval_reverse or 0
+            repetitions = word.repetitions_reverse or 0
+        else:
+            ease_factor = word.ease_factor or 2.5
+            interval = word.interval or 0
+            repetitions = word.repetitions or 0
+        
+        # Apply SM-2 algorithm
+        ease_factor, interval, repetitions = calculate_sm2(rating, ease_factor, interval, repetitions)
+        due_date = datetime.utcnow() + timedelta(days=interval)
+        
+        # Update direction-specific fields
+        if direction == 'reverse':
+            word.ease_factor_reverse = ease_factor
+            word.interval_reverse = interval
+            word.repetitions_reverse = repetitions
+            word.due_date_reverse = due_date
+        else:
+            word.ease_factor = ease_factor
+            word.interval = interval
+            word.repetitions = repetitions
+            word.due_date = due_date
     
     db.session.commit()
+    
+    # Return response with current values (even if tracking is disabled)
+    if direction == 'reverse':
+        current_ease = word.ease_factor_reverse or 2.5
+        current_interval = word.interval_reverse or 0
+        current_repetitions = word.repetitions_reverse or 0
+        current_due_date = word.due_date_reverse or datetime.utcnow()
+    else:
+        current_ease = word.ease_factor or 2.5
+        current_interval = word.interval or 0
+        current_repetitions = word.repetitions or 0
+        current_due_date = word.due_date or datetime.utcnow()
     
     return jsonify({
         'success': True,
         'word_id': word.id,
         'direction': direction,
-        'ease_factor': ease_factor,
-        'interval': interval,
-        'repetitions': repetitions,
-        'due_date': due_date.isoformat()
+        'ease_factor': current_ease,
+        'interval': current_interval,
+        'repetitions': current_repetitions,
+        'due_date': current_due_date.isoformat(),
+        'tracking_enabled': quiz.anki_tracking_enabled
     })
 
 
@@ -1807,42 +1431,57 @@ def api_review_sentence(sentence_id):
     if rating not in [1, 2, 3, 4]:
         return jsonify({'error': 'Rating must be 1, 2, 3, or 4'}), 400
     
-    # Get direction-specific fields
-    if direction == 'reverse':
-        ease_factor = sentence.ease_factor_reverse or 2.5
-        interval = sentence.interval_reverse or 0
-        repetitions = sentence.repetitions_reverse or 0
-    else:
-        ease_factor = sentence.ease_factor or 2.5
-        interval = sentence.interval or 0
-        repetitions = sentence.repetitions or 0
-    
-    # Apply SM-2 algorithm
-    ease_factor, interval, repetitions = calculate_sm2(rating, ease_factor, interval, repetitions)
-    due_date = datetime.utcnow() + timedelta(days=interval)
-    
-    # Update direction-specific fields
-    if direction == 'reverse':
-        sentence.ease_factor_reverse = ease_factor
-        sentence.interval_reverse = interval
-        sentence.repetitions_reverse = repetitions
-        sentence.due_date_reverse = due_date
-    else:
-        sentence.ease_factor = ease_factor
-        sentence.interval = interval
-        sentence.repetitions = repetitions
-        sentence.due_date = due_date
+    # Only update Anki tracking if enabled for this quiz
+    if quiz.anki_tracking_enabled:
+        # Get direction-specific fields
+        if direction == 'reverse':
+            ease_factor = sentence.ease_factor_reverse or 2.5
+            interval = sentence.interval_reverse or 0
+            repetitions = sentence.repetitions_reverse or 0
+        else:
+            ease_factor = sentence.ease_factor or 2.5
+            interval = sentence.interval or 0
+            repetitions = sentence.repetitions or 0
+        
+        # Apply SM-2 algorithm
+        ease_factor, interval, repetitions = calculate_sm2(rating, ease_factor, interval, repetitions)
+        due_date = datetime.utcnow() + timedelta(days=interval)
+        
+        # Update direction-specific fields
+        if direction == 'reverse':
+            sentence.ease_factor_reverse = ease_factor
+            sentence.interval_reverse = interval
+            sentence.repetitions_reverse = repetitions
+            sentence.due_date_reverse = due_date
+        else:
+            sentence.ease_factor = ease_factor
+            sentence.interval = interval
+            sentence.repetitions = repetitions
+            sentence.due_date = due_date
     
     db.session.commit()
+    
+    # Return response with current values (even if tracking is disabled)
+    if direction == 'reverse':
+        current_ease = sentence.ease_factor_reverse or 2.5
+        current_interval = sentence.interval_reverse or 0
+        current_repetitions = sentence.repetitions_reverse or 0
+        current_due_date = sentence.due_date_reverse or datetime.utcnow()
+    else:
+        current_ease = sentence.ease_factor or 2.5
+        current_interval = sentence.interval or 0
+        current_repetitions = sentence.repetitions or 0
+        current_due_date = sentence.due_date or datetime.utcnow()
     
     return jsonify({
         'success': True,
         'sentence_id': sentence.id,
         'direction': direction,
-        'ease_factor': ease_factor,
-        'interval': interval,
-        'repetitions': repetitions,
-        'due_date': due_date.isoformat()
+        'ease_factor': current_ease,
+        'interval': current_interval,
+        'repetitions': current_repetitions,
+        'due_date': current_due_date.isoformat(),
+        'tracking_enabled': quiz.anki_tracking_enabled
     })
 
 
@@ -1877,7 +1516,7 @@ def api_create_song_quiz():
     # Start background processing
     thread = threading.Thread(
         target=process_text_import_background,
-        args=(new_quiz.id, content, language, context),
+        args=(quiz_processing_deps, new_quiz.id, content, language, context),
         daemon=True
     )
     thread.start()
@@ -1903,6 +1542,10 @@ def api_import_text_to_quiz(quiz_id):
     quiz = db.session.get(Quiz, quiz_id)
     if not quiz or quiz.user_id != current_user.id:
         return jsonify({'error': 'Quiz not found or access denied'}), 404
+    
+    # Prevent modifying subscribed quizzes
+    if quiz.original_quiz_id is not None:
+        return jsonify({'error': 'Cannot modify subscribed quiz'}), 403
     
     data = request.get_json()
     if not data:
@@ -1935,7 +1578,7 @@ def api_import_text_to_quiz(quiz_id):
     # Start background processing
     thread = threading.Thread(
         target=process_text_import_background,
-        args=(quiz_id, content, language, context),
+        args=(quiz_processing_deps, quiz_id, content, language, context),
         daemon=True
     )
     thread.start()
@@ -1953,6 +1596,10 @@ def api_import_image_to_quiz(quiz_id):
     quiz = db.session.get(Quiz, quiz_id)
     if not quiz or quiz.user_id != current_user.id:
         return jsonify({'error': 'Quiz not found or access denied'}), 404
+    
+    # Prevent modifying subscribed quizzes
+    if quiz.original_quiz_id is not None:
+        return jsonify({'error': 'Cannot modify subscribed quiz'}), 403
     
     data = request.get_json()
     if not data:
@@ -1972,7 +1619,7 @@ def api_import_image_to_quiz(quiz_id):
     # Start background processing
     thread = threading.Thread(
         target=process_image_import_background,
-        args=(quiz_id, image_base64, context),
+        args=(quiz_processing_deps, quiz_id, image_base64, context),
         daemon=True
     )
     thread.start()
@@ -1981,107 +1628,6 @@ def api_import_image_to_quiz(quiz_id):
         'message': 'Processing image and extracting vocabulary...',
         'quiz_id': quiz_id
     }), 200
-
-
-def process_image_import_background(quiz_id, image_base64, context=""):
-    """Background function to extract text from image and then process vocabulary."""
-    with app.app_context():
-        quiz = db.session.get(Quiz, quiz_id)
-        if not quiz:
-            return
-        
-        try:
-            # Update status
-            quiz.processing_status = 'processing'
-            quiz.processing_message = 'Extracting text from image using AI...'
-            db.session.commit()
-            
-            # Use GPT-4 Vision to extract text
-            from openai import OpenAI
-            import os
-            
-            api_key = None
-            if os.path.exists("apikey.txt"):
-                with open("apikey.txt", 'r') as f:
-                    api_key = f.read().strip()
-            if not api_key:
-                api_key = os.getenv("OPENAI_API_KEY")
-            
-            client = OpenAI(api_key=api_key)
-            
-            # Determine expected language for OCR
-            target_lang = quiz.target_language or "Ukrainian"
-            source_lang = quiz.source_language or "English"
-            
-            response = client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": f"""You are an OCR expert. Extract ALL text from the image exactly as it appears.
-The image likely contains text in {target_lang} and/or {source_lang} for language learning purposes.
-
-Important:
-- Preserve the original text formatting as much as possible
-- Include ALL text visible in the image
-- If there are translations or explanations in parentheses, include them
-- Maintain line breaks where they appear meaningful
-- Do not translate or modify the text, just transcribe it exactly"""
-                    },
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "Extract all text from this image:"
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{image_base64}"
-                                }
-                            }
-                        ]
-                    }
-                ],
-                max_tokens=4000
-            )
-            
-            extracted_text = response.choices[0].message.content
-            
-            if not extracted_text or len(extracted_text.strip()) < 5:
-                quiz.processing_status = 'error'
-                quiz.processing_message = 'Could not extract text from image'
-                db.session.commit()
-                return
-            
-            quiz.processing_message = f'Text extracted. Processing vocabulary...'
-            db.session.commit()
-            
-            # Check for cancellation after OCR
-            db.session.refresh(quiz)
-            if quiz.processing_status == 'cancelled':
-                return
-            
-            # Now process the extracted text using the same flow as text import
-            # Auto-detect language from extracted text
-            def has_cyrillic(text):
-                return any('\u0400' <= char <= '\u04FF' for char in text)
-            
-            if has_cyrillic(extracted_text):
-                language = quiz.target_language or "Ukrainian"
-            else:
-                language = quiz.source_language or "English"
-            
-            # Use the existing text import function
-            process_text_import_background(quiz_id, extracted_text, language, context)
-            
-        except Exception as e:
-            print(f"Error processing image: {e}")
-            quiz.processing_status = 'error'
-            quiz.processing_status = 'error'
-            quiz.processing_message = f'Error: {str(e)}'
-            db.session.commit()
 
 
 @app.route("/api/quiz/<int:quiz_id>/cancel-processing", methods=["POST"])
@@ -2113,8 +1659,27 @@ def api_cancel_processing(quiz_id):
 def api_folders():
     """Get all folders or create a new folder."""
     if request.method == "GET":
+        # Ensure "subscriptions" folder exists at root level
+        subscriptions_folder = Folder.query.filter_by(
+            user_id=current_user.id,
+            parent_id=None,
+            name='subscriptions'
+        ).first()
+        
+        if not subscriptions_folder:
+            subscriptions_folder = Folder(
+                name='subscriptions',
+                user_id=current_user.id,
+                parent_id=None
+            )
+            db.session.add(subscriptions_folder)
+            db.session.commit()
+        
         # Get all folders for the user, build tree structure
         folders = Folder.query.filter_by(user_id=current_user.id, parent_id=None).all()
+        
+        # Sort folders so "subscriptions" appears first
+        folders = sorted(folders, key=lambda f: (f.name != 'subscriptions', f.name.lower()))
         
         def build_folder_tree(folder):
             """Recursively build folder tree with quizzes."""
@@ -2133,6 +1698,8 @@ def api_folders():
                         'name': q.name,
                         'is_song_quiz': True,  # All quizzes support sentences
                         'processing_status': q.processing_status,
+                        'anki_tracking_enabled': q.anki_tracking_enabled if hasattr(q, 'anki_tracking_enabled') else True,
+                        'is_public': q.is_public if hasattr(q, 'is_public') else False,
                         'words': [{'id': w.id, 'lemma': w.lemma, 'translation': w.translation} for w in q.words]
                     }
                     for q in quizzes
@@ -2176,6 +1743,202 @@ def api_folders():
             'created_at': new_folder.created_at.isoformat(),
             'quizzes': [],
             'subfolders': []
+        }
+    }), 201
+
+
+@app.route("/api/quiz/<int:quiz_id>/subscribe", methods=["POST"])
+@login_required
+def api_subscribe_to_quiz(quiz_id):
+    """Subscribe to a public quiz by copying it to the user's subscriptions folder."""
+    # Get the public quiz
+    original_quiz = db.session.get(Quiz, quiz_id)
+    if not original_quiz:
+        return jsonify({'error': 'Quiz not found'}), 404
+    
+    # Check if user is trying to subscribe to their own quiz
+    if original_quiz.user_id == current_user.id:
+        return jsonify({'error': 'Cannot subscribe to your own quiz'}), 400
+    
+    # Check if quiz is public
+    if not (original_quiz.is_public if hasattr(original_quiz, 'is_public') else False):
+        return jsonify({'error': 'Quiz is not public'}), 403
+    
+    # Check if user already has a subscription to this quiz
+    existing_subscription = Quiz.query.filter_by(
+        user_id=current_user.id,
+        original_quiz_id=quiz_id
+    ).first()
+    
+    if existing_subscription:
+        return jsonify({
+            'error': 'Already subscribed to this quiz',
+            'quiz_id': existing_subscription.id
+        }), 400
+    
+    # Get or create subscriptions folder
+    subscriptions_folder = Folder.query.filter_by(
+        user_id=current_user.id,
+        parent_id=None,
+        name='subscriptions'
+    ).first()
+    
+    if not subscriptions_folder:
+        subscriptions_folder = Folder(
+            name='subscriptions',
+            user_id=current_user.id,
+            parent_id=None
+        )
+        db.session.add(subscriptions_folder)
+        db.session.flush()
+    
+    # Create a copy of the quiz
+    new_quiz = Quiz(
+        name=original_quiz.name,
+        user_id=current_user.id,
+        folder_id=subscriptions_folder.id,
+        source_language=original_quiz.source_language,
+        target_language=original_quiz.target_language,
+        original_quiz_id=original_quiz.id,  # Track the original quiz
+        is_public=False,  # Subscriptions are private
+        anki_tracking_enabled=True,  # Users can track their own progress
+        processing_status='completed'
+    )
+    db.session.add(new_quiz)
+    db.session.flush()
+    
+    # Copy all words with variants
+    for word in original_quiz.words:
+        new_word = Word(
+            lemma=word.lemma,
+            translation=word.translation,
+            quiz_id=new_quiz.id,
+            properties=word.properties,
+            example_sentence=word.example_sentence,
+            explanation=word.explanation
+        )
+        db.session.add(new_word)
+        db.session.flush()
+        
+        # Copy variants
+        variants = Variant.query.filter_by(word_id=word.id).all()
+        for variant in variants:
+            new_variant = Variant(
+                value=variant.value,
+                translation=variant.translation,
+                word_id=new_word.id
+            )
+            new_variant.set_tags(variant.get_tags())
+            db.session.add(new_variant)
+    
+    # Copy all sentences
+    for sentence in original_quiz.sentences:
+        new_sentence = Sentence(
+            text=sentence.text,
+            translation=sentence.translation,
+            quiz_id=new_quiz.id
+        )
+        db.session.add(new_sentence)
+    
+    db.session.commit()
+    
+    return jsonify({
+        'success': True,
+        'quiz': {
+            'id': new_quiz.id,
+            'name': new_quiz.name,
+            'folder_id': new_quiz.folder_id,
+            'original_quiz_id': new_quiz.original_quiz_id
+        }
+    }), 201
+
+
+@app.route("/api/quiz/<int:quiz_id>/copy", methods=["POST"])
+@login_required
+def api_copy_quiz(quiz_id):
+    """Copy a public quiz to the user's own quizzes (editable copy)."""
+    # Get the public quiz
+    original_quiz = db.session.get(Quiz, quiz_id)
+    if not original_quiz:
+        return jsonify({'error': 'Quiz not found'}), 404
+    
+    # Check if user is trying to copy their own quiz
+    if original_quiz.user_id == current_user.id:
+        return jsonify({'error': 'Cannot copy your own quiz'}), 400
+    
+    # Check if quiz is public
+    if not (original_quiz.is_public if hasattr(original_quiz, 'is_public') else False):
+        return jsonify({'error': 'Quiz is not public'}), 403
+    
+    data = request.get_json() or {}
+    folder_id = data.get('folder_id')  # Optional: user can specify a folder
+    
+    # Validate folder belongs to user if provided
+    if folder_id:
+        folder = db.session.get(Folder, folder_id)
+        if not folder or folder.user_id != current_user.id:
+            return jsonify({'error': 'Invalid folder'}), 400
+        # Prevent copying to subscriptions folder
+        if folder.name == 'subscriptions' and folder.parent_id is None:
+            return jsonify({'error': 'Cannot copy quiz to subscriptions folder. Use Subscribe instead.'}), 400
+    
+    # Create a copy of the quiz (editable, no original_quiz_id)
+    new_quiz = Quiz(
+        name=original_quiz.name,
+        user_id=current_user.id,
+        folder_id=folder_id,  # Can be None (root) or a user folder
+        source_language=original_quiz.source_language,
+        target_language=original_quiz.target_language,
+        original_quiz_id=None,  # No original_quiz_id - this is an independent copy
+        is_public=False,  # Copies are private by default
+        anki_tracking_enabled=True,
+        processing_status='completed'
+    )
+    db.session.add(new_quiz)
+    db.session.flush()
+    
+    # Copy all words with variants
+    for word in original_quiz.words:
+        new_word = Word(
+            lemma=word.lemma,
+            translation=word.translation,
+            quiz_id=new_quiz.id,
+            properties=word.properties,
+            example_sentence=word.example_sentence,
+            explanation=word.explanation
+        )
+        db.session.add(new_word)
+        db.session.flush()
+        
+        # Copy variants
+        variants = Variant.query.filter_by(word_id=word.id).all()
+        for variant in variants:
+            new_variant = Variant(
+                value=variant.value,
+                translation=variant.translation,
+                word_id=new_word.id
+            )
+            new_variant.set_tags(variant.get_tags())
+            db.session.add(new_variant)
+    
+    # Copy all sentences
+    for sentence in original_quiz.sentences:
+        new_sentence = Sentence(
+            text=sentence.text,
+            translation=sentence.translation,
+            quiz_id=new_quiz.id
+        )
+        db.session.add(new_sentence)
+    
+    db.session.commit()
+    
+    return jsonify({
+        'success': True,
+        'quiz': {
+            'id': new_quiz.id,
+            'name': new_quiz.name,
+            'folder_id': new_quiz.folder_id,
+            'original_quiz_id': new_quiz.original_quiz_id
         }
     }), 201
 
@@ -2290,6 +2053,11 @@ def api_move_quiz(quiz_id):
         folder = db.session.get(Folder, folder_id)
         if not folder or folder.user_id != current_user.id:
             return jsonify({'error': 'Folder not found'}), 404
+        # Prevent moving non-subscription quizzes to subscriptions folder
+        # Only subscriptions (with original_quiz_id) can be in subscriptions folder
+        if folder.name == 'subscriptions' and folder.parent_id is None:
+            if quiz.original_quiz_id is None:
+                return jsonify({'error': 'Cannot move quiz to subscriptions folder. Only subscribed quizzes can be placed there.'}), 400
     
     quiz.folder_id = folder_id
     db.session.commit()

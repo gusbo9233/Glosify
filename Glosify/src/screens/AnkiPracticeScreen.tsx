@@ -18,9 +18,10 @@ const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
 interface AnkiPracticeScreenProps {
   onClose: () => void;
+  selectedWordIds?: Set<number>;
 }
 
-const AnkiPracticeScreen: React.FC<AnkiPracticeScreenProps> = ({ onClose }) => {
+const AnkiPracticeScreen: React.FC<AnkiPracticeScreenProps> = ({ onClose, selectedWordIds }) => {
   const { selectedQuiz, practiceSettings } = useApp();
   const [isLoading, setIsLoading] = useState(true);
   const [cards, setCards] = useState<AnkiCard[]>([]);
@@ -35,7 +36,7 @@ const AnkiPracticeScreen: React.FC<AnkiPracticeScreenProps> = ({ onClose }) => {
   // Load due cards based on practice mode and direction
   useEffect(() => {
     loadCards();
-  }, [selectedQuiz?.id, practiceSettings.mode, practiceSettings.direction]);
+  }, [selectedQuiz?.id, practiceSettings.mode, practiceSettings.direction, selectedWordIds]);
 
   const loadCards = async () => {
     if (!selectedQuiz) return;
@@ -46,11 +47,12 @@ const AnkiPracticeScreen: React.FC<AnkiPracticeScreenProps> = ({ onClose }) => {
       const cardMode = practiceSettings.mode === 'sentences' ? 'sentences' : 'words';
       setMode(cardMode);
       
-      // Pass direction to get cards due for that specific direction
+      // Pass direction and selectedWordIds (only for words mode) to get cards due for that specific direction
       const response: AnkiCardsResponse = await quizService.getAnkiCards(
         selectedQuiz.id, 
         cardMode,
-        practiceSettings.direction
+        practiceSettings.direction,
+        cardMode === 'words' ? selectedWordIds : undefined
       );
       // Include both due cards and new cards (due first, then new)
       const allCards = [...response.due_cards, ...response.new_cards];

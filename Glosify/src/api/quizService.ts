@@ -31,6 +31,17 @@ export const quizService = {
     }
   },
 
+  // Get all public quizzes (no authentication required)
+  async getPublicQuizzes(): Promise<Quiz[]> {
+    try {
+      const response = await apiClient.get('/api/quizzes/public');
+      return response.data.quizzes || [];
+    } catch (error) {
+      console.error('Error fetching public quizzes:', error);
+      throw error;
+    }
+  },
+
   // Get quiz details with words and sentences
   async getQuizDetail(quizId: number): Promise<{ quiz: Quiz; words: Word[]; sentences: Sentence[] }> {
     try {
@@ -38,6 +49,17 @@ export const quizService = {
       return response.data;
     } catch (error) {
       console.error('Error fetching quiz detail:', error);
+      throw error;
+    }
+  },
+
+  // Update quiz settings
+  async updateQuiz(quizId: number, updates: { anki_tracking_enabled?: boolean; is_public?: boolean }): Promise<Quiz> {
+    try {
+      const response = await apiClient.put(`/api/quiz/${quizId}`, updates);
+      return response.data.quiz;
+    } catch (error) {
+      console.error('Error updating quiz:', error);
       throw error;
     }
   },
@@ -239,11 +261,16 @@ export const quizService = {
   async getAnkiCards(
     quizId: number, 
     mode: 'words' | 'sentences' = 'words',
-    direction: 'forward' | 'reverse' = 'forward'
+    direction: 'forward' | 'reverse' = 'forward',
+    wordIds?: Set<number>
   ): Promise<AnkiCardsResponse> {
     try {
+      const params: any = { mode, direction };
+      if (wordIds && wordIds.size > 0) {
+        params.word_ids = Array.from(wordIds).join(',');
+      }
       const response = await apiClient.get(`/api/quiz/${quizId}/anki-cards`, {
-        params: { mode, direction }
+        params
       });
       return response.data;
     } catch (error) {
@@ -316,6 +343,30 @@ export const quizService = {
       return response.data;
     } catch (error) {
       console.error('Error fetching Anki stats:', error);
+      throw error;
+    }
+  },
+
+  // Subscribe to a public quiz
+  async subscribeToQuiz(quizId: number): Promise<Quiz> {
+    try {
+      const response = await apiClient.post(`/api/quiz/${quizId}/subscribe`);
+      return response.data.quiz;
+    } catch (error) {
+      console.error('Error subscribing to quiz:', error);
+      throw error;
+    }
+  },
+
+  // Copy a public quiz (creates an editable copy)
+  async copyQuiz(quizId: number, folderId?: number | null): Promise<{ id: number }> {
+    try {
+      const response = await apiClient.post(`/api/quiz/${quizId}/copy`, {
+        folder_id: folderId
+      });
+      return response.data.quiz;
+    } catch (error) {
+      console.error('Error copying quiz:', error);
       throw error;
     }
   },

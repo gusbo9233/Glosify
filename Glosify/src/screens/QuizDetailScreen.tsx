@@ -28,7 +28,7 @@ const isTablet = SCREEN_WIDTH > 768;
 interface QuizDetailScreenProps {
   onWordPress: (word: Word) => void;
   onStartPractice: (selectedWordIds: Set<number>) => void;
-  onStartAnkiPractice: () => void;
+  onStartAnkiPractice: (selectedWordIds: Set<number>) => void;
 }
 
 const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
@@ -36,7 +36,7 @@ const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
   onStartPractice,
   onStartAnkiPractice,
 }) => {
-  const { quizzes, selectedQuiz, practiceSettings, updatePracticeSettings, addWordToQuiz, importTextToQuiz, importImageToQuiz, selectQuiz } = useApp();
+  const { quizzes, selectedQuiz, practiceSettings, updatePracticeSettings, addWordToQuiz, importTextToQuiz, importImageToQuiz, selectQuiz, loadFolders, user } = useApp();
   const [showAddWord, setShowAddWord] = useState(false);
   const [newLemma, setNewLemma] = useState('');
   const [newTranslation, setNewTranslation] = useState('');
@@ -50,12 +50,24 @@ const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
   const [editLemma, setEditLemma] = useState('');
   const [editTranslation, setEditTranslation] = useState('');
   const [showCopyModal, setShowCopyModal] = useState(false);
+  const [showResetAnkiModal, setShowResetAnkiModal] = useState(false);
+  const [isResettingAnki, setIsResettingAnki] = useState(false);
+  const [ankiTrackingError, setAnkiTrackingError] = useState<string | null>(null);
+  const [isPublicError, setIsPublicError] = useState<string | null>(null);
+  const [isSubscribing, setIsSubscribing] = useState(false);
+  const [isCopying, setIsCopying] = useState(false);
+  
+  // Check if this is a public quiz owned by someone else
+  const isPublicQuizFromOtherUser = selectedQuiz?.is_public === true && selectedQuiz?.user_id !== user?.id;
+  // Check if this is a subscribed quiz (read-only)
+  const isSubscribedQuiz = selectedQuiz?.original_quiz_id !== undefined && selectedQuiz?.original_quiz_id !== null;
   
   // Text import state
   const [importContent, setImportContent] = useState('');
   const [importContext, setImportContext] = useState('');
   const [isImporting, setIsImporting] = useState(false);
   const [pollIntervalRef, setPollIntervalRef] = useState<NodeJS.Timeout | null>(null);
+  const pollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const words = selectedQuiz?.words || [];
   const sentences = selectedQuiz?.sentences || [];
@@ -119,11 +131,14 @@ const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
     }
   }, [selectedQuiz?.processing_status]);
 
-  // Cleanup poll interval on unmount or quiz change
+  // Cleanup poll interval/timeout on unmount or quiz change
   useEffect(() => {
     return () => {
       if (pollIntervalRef) {
         clearInterval(pollIntervalRef);
+      }
+      if (pollTimeoutRef.current) {
+        clearTimeout(pollTimeoutRef.current);
       }
     };
   }, [pollIntervalRef]);
@@ -200,6 +215,102 @@ const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
     onStartPractice(selectedWordIds);
   };
 
+  const handleResetAnki = async () => {
+    if (!selectedQuiz) return;
+    
+    setIsResettingAnki(true);
+    try {
+      // Reset both forward and reverse directions for words
+      await quizService.resetAnki(selectedQuiz.id, 'words', 'forward');
+      await quizService.resetAnki(selectedQuiz.id, 'words', 'reverse');
+      setShowResetAnkiModal(false);
+      // Reload the quiz to refresh the data
+      const { quiz: updatedQuiz } = await quizService.getQuizDetail(selectedQuiz.id);
+      await selectQuiz(updatedQuiz);
+    } catch (error) {
+      console.error('Failed to reset Anki:', error);
+      setErrorMessage('Failed to reset Anki tracking. Please try again.');
+    } finally {
+      setIsResettingAnki(false);
+    }
+  };
+
+  const handleToggleAnkiTracking = async () => {
+    if (!selectedQuiz) return;
+    
+    setAnkiTrackingError(null);
+    const newValue = !(selectedQuiz.anki_tracking_enabled !== false);
+    try {
+      await quizService.updateQuiz(selectedQuiz.id, { anki_tracking_enabled: newValue });
+      // Reload the quiz to refresh the data
+      const { quiz: updatedQuiz } = await quizService.getQuizDetail(selectedQuiz.id);
+      await selectQuiz(updatedQuiz);
+    } catch (error: any) {
+      console.error('Failed to update Anki tracking:', error);
+      const errorMsg = error?.response?.data?.error || error?.message || 'Failed to update Anki tracking setting. Please try again.';
+      setAnkiTrackingError(errorMsg);
+    }
+  };
+
+  const handleToggleIsPublic = async () => {
+    if (!selectedQuiz) return;
+    
+    setIsPublicError(null);
+    const newValue = !(selectedQuiz.is_public === true);
+    try {
+      await quizService.updateQuiz(selectedQuiz.id, { is_public: newValue });
+      // Reload the quiz to refresh the data
+      const { quiz: updatedQuiz } = await quizService.getQuizDetail(selectedQuiz.id);
+      await selectQuiz(updatedQuiz);
+    } catch (error: any) {
+      console.error('Failed to update public status:', error);
+      const errorMsg = error?.response?.data?.error || error?.message || 'Failed to update public status. Please try again.';
+      setIsPublicError(errorMsg);
+    }
+  };
+
+  const handleSubscribe = async () => {
+    if (!selectedQuiz || isSubscribing) return;
+    
+    setIsSubscribing(true);
+    try {
+      const response = await quizService.subscribeToQuiz(selectedQuiz.id);
+      // Reload folders to show the new subscription
+      await loadFolders();
+      // Navigate to the subscribed quiz
+      const { quiz: subscribedQuiz } = await quizService.getQuizDetail(response.id);
+      await selectQuiz(subscribedQuiz);
+    } catch (error: any) {
+      console.error('Failed to subscribe to quiz:', error);
+      if (error?.response?.status === 400 && error?.response?.data?.quiz_id) {
+        // Already subscribed, navigate to the subscription
+        const { quiz: subscribedQuiz } = await quizService.getQuizDetail(error.response.data.quiz_id);
+        await selectQuiz(subscribedQuiz);
+      }
+    } finally {
+      setIsSubscribing(false);
+    }
+  };
+
+  const handleCopy = async () => {
+    if (!selectedQuiz || isCopying) return;
+    
+    setIsCopying(true);
+    try {
+      const response = await quizService.copyQuiz(selectedQuiz.id);
+      // Reload folders to show the new copy
+      await loadFolders();
+      // Navigate to the copied quiz
+      const { quiz: copiedQuiz } = await quizService.getQuizDetail(response.id);
+      await selectQuiz(copiedQuiz);
+    } catch (error: any) {
+      console.error('Failed to copy quiz:', error);
+      setErrorMessage(error?.response?.data?.error || error?.message || 'Failed to copy quiz. Please try again.');
+    } finally {
+      setIsCopying(false);
+    }
+  };
+
   if (!selectedQuiz) {
     return (
       <View style={styles.emptyContainer}>
@@ -243,6 +354,8 @@ const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
   };
 
   const openWordMenu = (word: Word) => {
+    // Don't allow editing words in subscribed quizzes
+    if (isSubscribedQuiz) return;
     setMenuWord(word);
     setShowWordMenu(true);
   };
@@ -335,6 +448,10 @@ const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
                 updatedQuiz.quiz.processing_status === 'cancelled') {
               if (pollInterval) clearInterval(pollInterval);
               setPollIntervalRef(null);
+              if (pollTimeoutRef.current) {
+                clearTimeout(pollTimeoutRef.current);
+                pollTimeoutRef.current = null;
+              }
               setIsImporting(false);
               if (updatedQuiz.quiz.processing_status !== 'cancelled') {
         setImportContent('');
@@ -345,6 +462,10 @@ const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
             console.error('Error polling quiz status:', error);
             if (pollInterval) clearInterval(pollInterval);
             setPollIntervalRef(null);
+            if (pollTimeoutRef.current) {
+              clearTimeout(pollTimeoutRef.current);
+              pollTimeoutRef.current = null;
+            }
             setIsImporting(false);
           }
         }, 1000); // Poll every second
@@ -352,10 +473,14 @@ const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
         setPollIntervalRef(pollInterval);
         
         // Timeout after 5 minutes
-        setTimeout(() => {
+        if (pollTimeoutRef.current) {
+          clearTimeout(pollTimeoutRef.current);
+        }
+        pollTimeoutRef.current = setTimeout(() => {
           if (pollInterval) clearInterval(pollInterval);
           setPollIntervalRef(null);
           setIsImporting(false);
+          pollTimeoutRef.current = null;
         }, 300000);
       } catch (error) {
         console.error('Failed to import text:', error);
@@ -374,6 +499,10 @@ const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
       if (pollIntervalRef) {
         clearInterval(pollIntervalRef);
         setPollIntervalRef(null);
+      }
+      if (pollTimeoutRef.current) {
+        clearTimeout(pollTimeoutRef.current);
+        pollTimeoutRef.current = null;
       }
       
       // Reload quiz to get updated status
@@ -461,6 +590,10 @@ const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
               updatedQuiz.quiz.processing_status === 'cancelled') {
             if (pollInterval) clearInterval(pollInterval);
             setPollIntervalRef(null);
+            if (pollTimeoutRef.current) {
+              clearTimeout(pollTimeoutRef.current);
+              pollTimeoutRef.current = null;
+            }
             setIsImporting(false);
             if (updatedQuiz.quiz.processing_status !== 'cancelled') {
               setImportContext('');
@@ -470,6 +603,10 @@ const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
           console.error('Error polling quiz status:', error);
           if (pollInterval) clearInterval(pollInterval);
           setPollIntervalRef(null);
+          if (pollTimeoutRef.current) {
+            clearTimeout(pollTimeoutRef.current);
+            pollTimeoutRef.current = null;
+          }
           setIsImporting(false);
         }
       }, 1000);
@@ -477,10 +614,14 @@ const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
       setPollIntervalRef(pollInterval);
 
       // Timeout after 5 minutes
-      setTimeout(() => {
+      if (pollTimeoutRef.current) {
+        clearTimeout(pollTimeoutRef.current);
+      }
+      pollTimeoutRef.current = setTimeout(() => {
         if (pollInterval) clearInterval(pollInterval);
         setPollIntervalRef(null);
         setIsImporting(false);
+        pollTimeoutRef.current = null;
       }, 300000);
     } catch (error) {
       console.error('Failed to import image:', error);
@@ -511,6 +652,85 @@ const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
               {words.length} words • Created{' '}
               {new Date(selectedQuiz.created_at).toLocaleDateString()}
             </Text>
+            {/* Anki Tracking Toggle */}
+            <View>
+              <TouchableOpacity
+                style={styles.ankiTrackingToggle}
+                onPress={handleToggleAnkiTracking}
+              >
+                <Ionicons
+                  name={selectedQuiz.anki_tracking_enabled !== false ? "checkbox" : "checkbox-outline"}
+                  size={20}
+                  color={selectedQuiz.anki_tracking_enabled !== false ? colors.primary : colors.textSecondary}
+                />
+                <Text style={styles.ankiTrackingText}>Anki Tracking</Text>
+              </TouchableOpacity>
+              {ankiTrackingError && (
+                <Text style={styles.ankiTrackingErrorText}>{ankiTrackingError}</Text>
+              )}
+            </View>
+
+            {/* Public/Private Toggle - Only show if user owns the quiz */}
+            {selectedQuiz.user_id === user?.id && (
+              <View>
+                <TouchableOpacity
+                  style={styles.ankiTrackingToggle}
+                  onPress={handleToggleIsPublic}
+                >
+                  <Ionicons
+                    name={selectedQuiz.is_public === true ? "checkbox" : "checkbox-outline"}
+                    size={20}
+                    color={selectedQuiz.is_public === true ? colors.primary : colors.textSecondary}
+                  />
+                  <Text style={styles.ankiTrackingText}>Public Quiz</Text>
+                </TouchableOpacity>
+                {isPublicError && (
+                  <Text style={styles.ankiTrackingErrorText}>{isPublicError}</Text>
+                )}
+              </View>
+            )}
+
+            {/* Subscribe and Copy Buttons - Show for public quizzes from other users */}
+            {isPublicQuizFromOtherUser && (
+              <View style={styles.publicQuizActions}>
+                <TouchableOpacity
+                  style={[styles.subscribeButton, styles.copyButton]}
+                  onPress={handleCopy}
+                  disabled={isCopying}
+                >
+                  {isCopying ? (
+                    <ActivityIndicator size="small" color={colors.primary} />
+                  ) : (
+                    <>
+                      <Ionicons name="copy-outline" size={20} color={colors.primary} />
+                      <Text style={styles.subscribeButtonText}>Copy</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.subscribeButton}
+                  onPress={handleSubscribe}
+                  disabled={isSubscribing}
+                >
+                  {isSubscribing ? (
+                    <ActivityIndicator size="small" color={colors.primary} />
+                  ) : (
+                    <>
+                      <Ionicons name="add" size={20} color={colors.primary} />
+                      <Text style={styles.subscribeButtonText}>Subscribe</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {/* Subscribed Quiz Indicator */}
+            {isSubscribedQuiz && (
+              <View style={styles.subscribedIndicator}>
+                <Ionicons name="checkmark-circle" size={20} color={colors.primary} />
+                <Text style={styles.subscribedText}>Subscribed Quiz (Read-only)</Text>
+              </View>
+            )}
           </View>
         </View>
 
@@ -539,7 +759,7 @@ const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
           {/* Anki Mode Button */}
           <TouchableOpacity
             style={styles.ankiButton}
-            onPress={onStartAnkiPractice}
+            onPress={() => onStartAnkiPractice(selectedWordIds)}
           >
             <Ionicons
               name="flash"
@@ -549,16 +769,31 @@ const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
             <Text style={styles.ankiButtonText}>Anki</Text>
           </TouchableOpacity>
 
+          {/* Reset Anki Button */}
           <TouchableOpacity
             style={styles.optionButton}
-            onPress={() => setShowAddWord(!showAddWord)}
+            onPress={() => setShowResetAnkiModal(true)}
           >
             <Ionicons
-              name={showAddWord ? 'close' : 'add'}
+              name="refresh"
               size={24}
               color={colors.textSecondary}
             />
           </TouchableOpacity>
+
+          {/* Add Word Button - Hide for subscribed quizzes */}
+          {!isSubscribedQuiz && (
+            <TouchableOpacity
+              style={styles.optionButton}
+              onPress={() => setShowAddWord(!showAddWord)}
+            >
+              <Ionicons
+                name={showAddWord ? 'close' : 'add'}
+                size={24}
+                color={colors.textSecondary}
+              />
+            </TouchableOpacity>
+          )}
 
           {/* Direction Selector */}
           <View style={styles.directionButtonsInline}>
@@ -1018,6 +1253,94 @@ const QuizDetailScreen: React.FC<QuizDetailScreenProps> = ({
           </View>
         </View>
       </Modal>
+
+      {/* Anki Tracking Error Modal */}
+      <Modal
+        visible={ankiTrackingError !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setAnkiTrackingError(null)}
+      >
+        <View style={styles.errorModalOverlay}>
+          <View style={styles.errorModalContent}>
+            <View style={styles.errorModalHeader}>
+              <Ionicons name="alert-circle" size={24} color={colors.error} />
+              <Text style={styles.errorModalTitle}>Error Updating Anki Tracking</Text>
+            </View>
+            <Text style={styles.errorModalText}>{ankiTrackingError}</Text>
+            <TouchableOpacity
+              style={styles.errorModalButton}
+              onPress={() => setAnkiTrackingError(null)}
+            >
+              <Text style={styles.errorModalButtonText}>OK</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Public Status Error Modal */}
+      <Modal
+        visible={isPublicError !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setIsPublicError(null)}
+      >
+        <View style={styles.errorModalOverlay}>
+          <View style={styles.errorModalContent}>
+            <View style={styles.errorModalHeader}>
+              <Ionicons name="alert-circle" size={24} color={colors.error} />
+              <Text style={styles.errorModalTitle}>Error Updating Public Status</Text>
+            </View>
+            <Text style={styles.errorModalText}>{isPublicError}</Text>
+            <TouchableOpacity
+              style={styles.errorModalButton}
+              onPress={() => setIsPublicError(null)}
+            >
+              <Text style={styles.errorModalButtonText}>OK</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Reset Anki Confirmation Modal */}
+      <Modal
+        visible={showResetAnkiModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowResetAnkiModal(false)}
+      >
+        <View style={styles.menuOverlay}>
+          <View style={styles.editModalContent}>
+            <Text style={styles.menuTitle}>Reset Anki Tracking</Text>
+            <Text style={styles.resetAnkiText}>
+              This will reset all Anki progress for words in this quiz. All words will become due again for both forward and reverse directions.
+            </Text>
+            <Text style={styles.resetAnkiWarning}>
+              This action cannot be undone.
+            </Text>
+            <View style={styles.editModalButtons}>
+              <TouchableOpacity
+                style={styles.editModalCancel}
+                onPress={() => setShowResetAnkiModal(false)}
+                disabled={isResettingAnki}
+              >
+                <Text style={styles.editModalCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.editModalSave, isResettingAnki && styles.editModalSaveDisabled]}
+                onPress={handleResetAnki}
+                disabled={isResettingAnki}
+              >
+                {isResettingAnki ? (
+                  <ActivityIndicator size="small" color={colors.background} />
+                ) : (
+                  <Text style={styles.editModalSaveText}>Reset</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 };
@@ -1087,6 +1410,64 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontSize: fontSize.sm,
     marginTop: spacing.sm,
+  },
+  ankiTrackingToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    marginTop: spacing.md,
+  },
+  ankiTrackingText: {
+    color: colors.textPrimary,
+    fontSize: fontSize.sm,
+    fontWeight: '500',
+  },
+  ankiTrackingErrorText: {
+    color: colors.error,
+    fontSize: fontSize.xs,
+    marginTop: spacing.xs,
+    marginLeft: spacing.md,
+  },
+  publicQuizActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  subscribeButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    backgroundColor: colors.primary + '20',
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    justifyContent: 'center',
+    flex: 1,
+  },
+  copyButton: {
+    flex: 1,
+  },
+  subscribeButtonText: {
+    color: colors.primary,
+    fontSize: fontSize.sm,
+    fontWeight: '600',
+  },
+  subscribedIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    marginTop: spacing.md,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    backgroundColor: colors.primary + '10',
+    borderRadius: borderRadius.md,
+  },
+  subscribedText: {
+    color: colors.primary,
+    fontSize: fontSize.sm,
+    fontWeight: '500',
   },
   actions: {
     flexDirection: 'row',
@@ -1271,6 +1652,21 @@ const styles = StyleSheet.create({
     color: colors.background,
     fontSize: fontSize.md,
     fontWeight: '600',
+  },
+  editModalSaveDisabled: {
+    opacity: 0.5,
+  },
+  resetAnkiText: {
+    color: colors.textPrimary,
+    fontSize: fontSize.md,
+    marginBottom: spacing.md,
+    lineHeight: 20,
+  },
+  resetAnkiWarning: {
+    color: colors.error,
+    fontSize: fontSize.sm,
+    fontWeight: '600',
+    marginBottom: spacing.lg,
   },
   copyModalContent: {
     backgroundColor: colors.surface,

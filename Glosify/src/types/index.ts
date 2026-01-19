@@ -85,6 +85,11 @@ export interface Quiz {
   processing_message?: string;
   source_language?: string;
   target_language?: string;
+  anki_tracking_enabled?: boolean;
+  is_public?: boolean;
+  original_quiz_id?: number;
+  word_count?: number;
+  sentence_count?: number;
   words?: Word[];
   sentences?: Sentence[];
 }
