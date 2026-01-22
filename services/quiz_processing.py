@@ -1,5 +1,4 @@
 import json
-import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -19,7 +18,7 @@ class QuizProcessingDeps:
     Variant: object
 
 
-def process_text_import_background(deps, quiz_id, content, language, context=""):
+def process_text_import_background(deps, quiz_id, content, language, context="", api_key=None):
     """Background function to process any text and extract vocabulary using GPT."""
     with deps.app.app_context():
         quiz = deps.db.session.get(deps.Quiz, quiz_id)
@@ -40,15 +39,21 @@ def process_text_import_background(deps, quiz_id, content, language, context="")
             user_knows = quiz.source_language or "English"  # What user knows
             user_learning = quiz.target_language or "Ukrainian"  # What user is learning (ALWAYS Ukrainian/Polish)
 
+            if not api_key:
+                quiz.processing_status = 'error'
+                quiz.processing_message = 'API key required to use AI features.'
+                deps.db.session.commit()
+                return
+
             # Use appropriate GPT caller based on target language
             # Polish uses a specialized caller tailored for Polish textbook content
             is_polish = user_learning == "Polish"
             if is_polish:
-                caller = get_gpt_caller_polish()
+                caller = get_gpt_caller_polish(api_key=api_key)
                 word_converter = convert_to_word_class_polish
             else:
                 # Ukrainian and other languages use the standard caller
-                caller = get_gpt_caller()
+                caller = get_gpt_caller(api_key=api_key)
                 word_converter = convert_to_word_class
 
             # Determine word pair direction based on text language
@@ -279,7 +284,7 @@ def process_text_import_background(deps, quiz_id, content, language, context="")
             deps.db.session.commit()
 
 
-def process_prompt_import_background(deps, quiz_id, prompt, source_language, target_language, context=""):
+def process_prompt_import_background(deps, quiz_id, prompt, source_language, target_language, context="", api_key=None):
     """Background function to generate vocabulary from a prompt and process it."""
     with deps.app.app_context():
         quiz = deps.db.session.get(deps.Quiz, quiz_id)
@@ -292,8 +297,14 @@ def process_prompt_import_background(deps, quiz_id, prompt, source_language, tar
             quiz.processing_message = 'Generating vocabulary from prompt...'
             deps.db.session.commit()
 
+            if not api_key:
+                quiz.processing_status = 'error'
+                quiz.processing_message = 'API key required to use AI features.'
+                deps.db.session.commit()
+                return
+
             # Stage 1: Generate word pairs from prompt
-            prompt_caller = get_gpt_caller_prompt()
+            prompt_caller = get_gpt_caller_prompt(api_key=api_key)
             prompt_vocab = prompt_caller.generate_vocabulary_from_prompt(
                 prompt=prompt,
                 source_language=target_language,  # The language being learned (Polish/Ukrainian)
@@ -311,10 +322,10 @@ def process_prompt_import_background(deps, quiz_id, prompt, source_language, tar
             # Stage 2: Use appropriate caller for full analysis
             is_polish = target_language == "Polish"
             if is_polish:
-                analysis_caller = get_gpt_caller_polish()
+                analysis_caller = get_gpt_caller_polish(api_key=api_key)
                 word_converter = convert_to_word_class_polish
             else:
-                analysis_caller = get_gpt_caller()
+                analysis_caller = get_gpt_caller(api_key=api_key)
                 word_converter = convert_to_word_class
 
             # Process each word pair through full analysis
@@ -435,12 +446,12 @@ def process_prompt_import_background(deps, quiz_id, prompt, source_language, tar
             deps.db.session.commit()
 
 
-def process_song_quiz_background(deps, quiz_id, lyrics, language, context=""):
+def process_song_quiz_background(deps, quiz_id, lyrics, language, context="", api_key=None):
     """Legacy function - calls the new generalized version."""
-    process_text_import_background(deps, quiz_id, lyrics, language, context)
+    process_text_import_background(deps, quiz_id, lyrics, language, context, api_key=api_key)
 
 
-def process_image_import_background(deps, quiz_id, image_base64, context=""):
+def process_image_import_background(deps, quiz_id, image_base64, context="", api_key=None):
     """Background function to extract text from image and then process vocabulary."""
     with deps.app.app_context():
         quiz = deps.db.session.get(deps.Quiz, quiz_id)
@@ -462,16 +473,14 @@ def process_image_import_background(deps, quiz_id, image_base64, context=""):
             if quiz.processing_status == 'cancelled':
                 return
 
+            if not api_key:
+                quiz.processing_status = 'error'
+                quiz.processing_message = 'API key required to use AI features.'
+                deps.db.session.commit()
+                return
+
             # Use GPT-4 Vision to extract text
             from openai import OpenAI
-
-            api_key = None
-            if os.path.exists("apikey.txt"):
-                with open("apikey.txt", 'r') as f:
-                    api_key = f.read().strip()
-            if not api_key:
-                api_key = os.getenv("OPENAI_API_KEY")
-
             client = OpenAI(api_key=api_key)
 
             # Determine expected language for OCR
@@ -544,7 +553,7 @@ Important:
                 language = quiz.source_language or "English"
 
             # Use the existing text import function
-            process_text_import_background(deps, quiz_id, extracted_text, language, context)
+            process_text_import_background(deps, quiz_id, extracted_text, language, context, api_key=api_key)
 
         except Exception as e:
             print(f"Error processing image: {e}")

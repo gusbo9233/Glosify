@@ -29,6 +29,7 @@ interface AppContextType extends AppState {
   login: (username: string, password: string) => Promise<boolean>;
   register: (username: string, password: string) => Promise<boolean>;
   logout: () => Promise<void>;
+  refreshUser: () => Promise<void>;
   
   // Data actions
   loadQuizzes: () => Promise<void>;
@@ -181,6 +182,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return true;
     }
     return false;
+  };
+
+  const refreshUser = async () => {
+    try {
+      const response = await authService.checkAuth();
+      if (response.success && response.user) {
+        setState(prev => ({ ...prev, user: response.user! }));
+      }
+    } catch (error) {
+      console.error('Failed to refresh user:', error);
+    }
   };
 
   const register = async (username: string, password: string): Promise<boolean> => {
@@ -479,6 +491,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     login,
     register,
     logout,
+    refreshUser,
     loadQuizzes,
     selectQuiz,
     selectWord,

@@ -22,9 +22,10 @@ interface SidebarProps {
   onClose?: () => void;
   onQuizSelect?: () => void;
   onHomeClick?: () => void;
+  onProfileClick?: () => void;
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ onClose, onQuizSelect, onHomeClick }) => {
+const Sidebar: React.FC<SidebarProps> = ({ onClose, onQuizSelect, onHomeClick, onProfileClick }) => {
   const { quizzes, folders, selectedQuiz, selectQuiz, createQuiz, deleteQuiz, createFolder, deleteFolder, toggleFolderExpanded, moveQuizToFolder, loadFolders, logout, user } = useApp();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
@@ -422,14 +423,14 @@ const Sidebar: React.FC<SidebarProps> = ({ onClose, onQuizSelect, onHomeClick })
 
       {/* User Section */}
       <View style={styles.userSection}>
-        <View style={styles.userInfo}>
+        <TouchableOpacity style={styles.userInfo} onPress={onProfileClick}>
           <View style={styles.avatar}>
             <Text style={styles.avatarText}>
               {user?.username?.charAt(0).toUpperCase() || 'U'}
             </Text>
           </View>
           <Text style={styles.username}>{user?.username || 'User'}</Text>
-        </View>
+        </TouchableOpacity>
         <TouchableOpacity onPress={logout} style={styles.logoutButton}>
           <Ionicons name="log-out-outline" size={20} color={colors.textSecondary} />
         </TouchableOpacity>

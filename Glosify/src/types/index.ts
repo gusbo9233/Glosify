@@ -3,6 +3,7 @@
 export interface User {
   id: number;
   username: string;
+  has_api_key?: boolean;
 }
 
 export interface Variant {

@@ -16,6 +16,7 @@ from services.quiz_processing import (
     process_image_import_background
 )
 from services.anki import calculate_sm2
+from services.encryption import encrypt_api_key, decrypt_api_key
 from database import db
 
 app = Flask(__name__)
@@ -23,6 +24,10 @@ app = Flask(__name__)
 # Use absolute path for database to avoid issues with working directory
 db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance', 'database.db')
 app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_path}"
+
+# Ensure SECRET_KEY is set as environment variable for encryption service
+if not os.getenv("SECRET_KEY"):
+    os.environ["SECRET_KEY"] = "thisisasecretkey"
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "thisisasecretkey")
 bcrypt = Bcrypt(app)
 db.init_app(app)
@@ -40,6 +45,22 @@ quiz_processing_deps = QuizProcessingDeps(
     Sentence=Sentence,
     Variant=Variant
 )
+
+
+def get_user_api_key(user):
+    if not getattr(user, "api_key_encrypted", None):
+        return None
+    try:
+        return decrypt_api_key(user.api_key_encrypted)
+    except Exception:
+        return None
+
+
+def require_user_api_key():
+    api_key = get_user_api_key(current_user)
+    if not api_key:
+        return None, jsonify({'error': 'API key required to use AI features.'}), 403
+    return api_key, None, None
 from forms import RegisterForm, LoginForm, QuizForm, TextImportForm, WordForm, VariantForm
 # Enable CORS for mobile app
 cors_origins = os.getenv("CORS_ORIGINS")
@@ -85,6 +106,11 @@ def create_song_quiz():
     form = TextImportForm()
     
     if form.validate_on_submit():
+        api_key = get_user_api_key(current_user)
+        if not api_key:
+            flash('API key required to use AI features.', 'error')
+            return redirect(url_for('create_song_quiz'))
+
         # Create the quiz immediately with pending status
         new_quiz = Quiz(
             name=form.name.data,
@@ -102,7 +128,7 @@ def create_song_quiz():
         context = form.context.data.strip() if form.context.data else ""
         thread = threading.Thread(
             target=process_text_import_background,
-            args=(quiz_processing_deps, new_quiz.id, content, language, context),
+            args=(quiz_processing_deps, new_quiz.id, content, language, context, api_key),
             daemon=True
         )
         thread.start()
@@ -139,7 +165,12 @@ def quiz_detail(quiz_id):
         
         # Use GPT to automatically determine properties and other fields
         try:
-            caller = get_gpt_caller()
+            api_key = get_user_api_key(current_user)
+            if not api_key:
+                flash('API key required to use AI features.', 'error')
+                return redirect(url_for('quiz_detail', quiz_id=quiz_id))
+
+            caller = get_gpt_caller(api_key=api_key)
             # Get word analysis from GPT (will determine pos, properties, etc.)
             # GPT can handle cases where only lemma or only translation is provided
             
@@ -472,7 +503,11 @@ def api_login():
             login_user(user)
             return jsonify({
                 'success': True,
-                'user': {'id': user.id, 'username': user.username}
+                'user': {
+                    'id': user.id,
+                    'username': user.username,
+                    'has_api_key': bool(getattr(user, "api_key_encrypted", None))
+                }
             })
     
     return jsonify({'success': False, 'message': 'Invalid credentials'}), 401
@@ -520,9 +555,35 @@ def api_me():
     if current_user.is_authenticated:
         return jsonify({
             'success': True,
-            'user': {'id': current_user.id, 'username': current_user.username}
+            'user': {
+                'id': current_user.id,
+                'username': current_user.username,
+                'has_api_key': bool(getattr(current_user, "api_key_encrypted", None))
+            }
         })
     return jsonify({'success': False}), 401
+
+
+@app.route("/api/me/api-key", methods=["POST", "DELETE"])
+@login_required
+def api_manage_api_key():
+    if request.method == "DELETE":
+        current_user.api_key_encrypted = None
+        db.session.commit()
+        return jsonify({'success': True})
+
+    data = request.get_json() or {}
+    api_key = (data.get('api_key') or '').strip()
+    if not api_key:
+        return jsonify({'error': 'API key required'}), 400
+
+    try:
+        current_user.api_key_encrypted = encrypt_api_key(api_key)
+    except Exception as e:
+        return jsonify({'error': f'Failed to store API key: {str(e)}'}), 500
+
+    db.session.commit()
+    return jsonify({'success': True})
 
 
 @app.route("/api/quizzes/public", methods=["GET"])
@@ -586,6 +647,11 @@ def api_quizzes():
     target_language = data.get('target_language', '').strip() or None
     prompt = data.get('prompt', '').strip() or None
     folder_id = data.get('folder_id')
+
+    if prompt and source_language and target_language:
+        api_key, error_response, status_code = require_user_api_key()
+        if error_response:
+            return error_response, status_code
     
     # Validate folder belongs to user if provided
     if folder_id:
@@ -616,7 +682,7 @@ def api_quizzes():
         context = data.get('context', '').strip() or ""
         thread = threading.Thread(
             target=process_prompt_import_background,
-            args=(quiz_processing_deps, new_quiz.id, prompt, source_language, target_language, context),
+            args=(quiz_processing_deps, new_quiz.id, prompt, source_language, target_language, context, api_key),
             daemon=True
         )
         thread.start()
@@ -773,7 +839,11 @@ def api_add_word(quiz_id):
     
     # Use GPT to analyze the word
     try:
-        caller = get_gpt_caller()
+        api_key, error_response, status_code = require_user_api_key()
+        if error_response:
+            return error_response, status_code
+
+        caller = get_gpt_caller(api_key=api_key)
         # Get source and target languages from quiz
         source_lang = quiz.source_language or "unknown"
         target_lang = quiz.target_language or "English"
@@ -1504,6 +1574,10 @@ def api_create_song_quiz():
     
     if not name or not language or not content:
         return jsonify({'error': 'Name, language, and content/lyrics required'}), 400
+
+    api_key, error_response, status_code = require_user_api_key()
+    if error_response:
+        return error_response, status_code
     
     new_quiz = Quiz(
         name=name,
@@ -1518,7 +1592,7 @@ def api_create_song_quiz():
     # Start background processing
     thread = threading.Thread(
         target=process_text_import_background,
-        args=(quiz_processing_deps, new_quiz.id, content, language, context),
+        args=(quiz_processing_deps, new_quiz.id, content, language, context, api_key),
         daemon=True
     )
     thread.start()
@@ -1558,6 +1632,10 @@ def api_import_text_to_quiz(quiz_id):
     
     if not content:
         return jsonify({'error': 'Content required.'}), 400
+
+    api_key, error_response, status_code = require_user_api_key()
+    if error_response:
+        return error_response, status_code
     
     # Auto-detect language from text content
     # Ukrainian/Polish is ALWAYS the language being practiced (target_language)
@@ -1580,7 +1658,7 @@ def api_import_text_to_quiz(quiz_id):
     # Start background processing
     thread = threading.Thread(
         target=process_text_import_background,
-        args=(quiz_processing_deps, quiz_id, content, language, context),
+        args=(quiz_processing_deps, quiz_id, content, language, context, api_key),
         daemon=True
     )
     thread.start()
@@ -1612,6 +1690,10 @@ def api_import_image_to_quiz(quiz_id):
     
     if not image_base64:
         return jsonify({'error': 'Image required.'}), 400
+
+    api_key, error_response, status_code = require_user_api_key()
+    if error_response:
+        return error_response, status_code
     
     # Mark quiz as processing
     quiz.processing_status = 'processing'
@@ -1621,7 +1703,7 @@ def api_import_image_to_quiz(quiz_id):
     # Start background processing
     thread = threading.Thread(
         target=process_image_import_background,
-        args=(quiz_processing_deps, quiz_id, image_base64, context),
+        args=(quiz_processing_deps, quiz_id, image_base64, context, api_key),
         daemon=True
     )
     thread.start()

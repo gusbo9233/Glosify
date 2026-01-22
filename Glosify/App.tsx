@@ -22,12 +22,13 @@ import LoginScreen from './src/screens/LoginScreen';
 import RegisterScreen from './src/screens/RegisterScreen';
 import HomeScreen from './src/screens/HomeScreen';
 import ExploreScreen from './src/screens/ExploreScreen';
+import ProfileScreen from './src/screens/ProfileScreen';
 import { Word, Quiz } from './src/types';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const isTablet = SCREEN_WIDTH > 768;
 
-type Screen = 'home' | 'quiz' | 'word' | 'practice' | 'anki' | 'explore';
+type Screen = 'home' | 'quiz' | 'word' | 'practice' | 'anki' | 'explore' | 'profile';
 type AuthScreen = 'login' | 'register';
 
 const MainApp: React.FC = () => {
@@ -156,7 +157,8 @@ const MainApp: React.FC = () => {
         {isTablet ? (
           <Sidebar 
             onHomeClick={handleHomeClick}
-            onQuizSelect={() => setCurrentScreen('quiz')} 
+            onQuizSelect={() => setCurrentScreen('quiz')}
+            onProfileClick={() => setCurrentScreen('profile')}
           />
         ) : (
           <Modal
@@ -174,6 +176,10 @@ const MainApp: React.FC = () => {
                 }}
                 onQuizSelect={() => {
                   setCurrentScreen('quiz');
+                  setShowSidebar(false);
+                }}
+                onProfileClick={() => {
+                  setCurrentScreen('profile');
                   setShowSidebar(false);
                 }}
               />
@@ -212,6 +218,9 @@ const MainApp: React.FC = () => {
                 loadFolders();
               }}
             />
+          )}
+          {currentScreen === 'profile' && (
+            <ProfileScreen onBack={() => setCurrentScreen('home')} />
           )}
           {currentScreen === 'quiz' && (
             <QuizDetailScreen
