@@ -8,6 +8,16 @@
 
 import { Platform } from 'react-native';
 
+const getWebHostname = (): string => {
+  // When running in a browser, "localhost" would refer to the user's computer,
+  // not the Raspberry Pi. Use the current page hostname instead.
+  if (typeof window !== 'undefined' && window.location?.hostname) {
+    return window.location.hostname;
+  }
+  // Fallback for non-browser environments
+  return 'localhost';
+};
+
 const getBaseUrl = () => {
   if (__DEV__) {
     // Development mode
@@ -19,10 +29,13 @@ const getBaseUrl = () => {
       return 'http://localhost:5001';
     } else {
       // Web
-      return 'http://localhost:5001';
+      return `http://${getWebHostname()}:5001`;
     }
   }
   // Production - replace with your actual server URL
+  if (Platform.OS === 'web') {
+    return `http://${getWebHostname()}:5001`;
+  }
   return 'http://localhost:5001';
 };
 

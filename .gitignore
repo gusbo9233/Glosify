@@ -13,8 +13,8 @@ dist/
 build/
 
 # Flask
-instance/database.db
-instance/*.db
+# Note: instance/database.db is tracked in git so it can be pulled
+instance/*.db-journal
 *.db-journal
 
 # Environment variables and secrets

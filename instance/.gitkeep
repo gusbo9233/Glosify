@@ -1,0 +1,2 @@
+# This file ensures the instance/ directory is tracked in git
+# The database.db file will be stored here and can be pulled from the repository
