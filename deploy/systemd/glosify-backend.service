@@ -1,0 +1,18 @@
+[Unit]
+Description=Glosify Flask backend
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/glosify
+Environment=PYTHONUNBUFFERED=1
+# Optional: set SECRET_KEY / CORS_ORIGINS here
+# Environment=SECRET_KEY=change-me
+# Environment=CORS_ORIGINS=http://<PI_IP>:8081,http://localhost:8081
+ExecStart=/opt/glosify/venv/bin/python /opt/glosify/app.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+

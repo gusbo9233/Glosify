@@ -7,6 +7,10 @@ This guide runs:
 
 Then you access the frontend from your laptop on the **same Wi‑Fi**.
 
+If you want the app to run continuously and auto-deploy from GitHub, see:
+
+- `docs/cicd-raspberry-pi.md`
+
 ## Prerequisites (on the Pi)
 
 - Raspberry Pi OS **64-bit** recommended
@@ -118,8 +122,8 @@ Yes. As long as you don’t delete `database.db`, your data persists across rest
 ### What happens when you `git pull`?
 
 - `git pull` updates tracked source files.
-- Your `database.db` file should **not** be overwritten (it’s not expected to be committed).
-- So your data stays, and you can just restart the backend + frontend.
+- This repo currently tracks `instance/database.db`, so a pull may also update the DB file.
+- If you want “Pi owns the DB” (common for servers), see `docs/cicd-raspberry-pi.md` for recommendations.
 
 ### Should you run `init_db.py` again after pulling?
 

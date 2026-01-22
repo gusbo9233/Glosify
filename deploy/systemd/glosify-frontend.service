@@ -1,0 +1,21 @@
+[Unit]
+Description=Glosify Expo web frontend (dev server)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/glosify/Glosify
+Environment=NODE_ENV=development
+# Expo can be noisy; keep it in the journal:
+Environment=FORCE_COLOR=0
+# If you want live reload/watch on the Pi, ensure CI is not set:
+Environment=CI=false
+
+# Use local expo binary (installed via npm ci/install)
+ExecStart=/opt/glosify/Glosify/node_modules/.bin/expo start --web --host lan --port 8081
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+
